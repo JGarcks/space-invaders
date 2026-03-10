@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artefacts
+build/
+dist/
+*.spec
+
+# Game save data
+highscores.json
+achievements.json
+
+# OS
+.DS_Store
+Thumbs.db
