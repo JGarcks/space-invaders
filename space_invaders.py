@@ -62,25 +62,33 @@ INVINCIBILITY_TIME = 2.0
 ENEMY_BULLET_SPEED = 450
 ENEMY_SHOOT_INTERVAL = 1.4
 
-# ── NEW: UFO constants ────────────────────────────────────────────────────────
+# ── Extra life milestones ─────────────────────────────────────────────────────
+# IMPROVEMENT 2: Award extra lives at these score thresholds
+EXTRA_LIFE_MILESTONES = [1000, 3000, 7000, 15000, 30000]
+
+# ── UFO constants ─────────────────────────────────────────────────────────────
 UFO_SPEED = 380
 UFO_SCORE_VALUES = [50, 100, 150, 200, 250, 300]
 UFO_INTERVAL_MIN = 20.0
 UFO_INTERVAL_MAX = 40.0
 UFO_Y = 68
 
-# ── NEW: Barrier constants ────────────────────────────────────────────────────
+# ── Barrier constants ─────────────────────────────────────────────────────────
 BARRIER_COUNT = 4
 BARRIER_Y = HEIGHT - 230
 BARRIER_BLOCK_W = 14
 BARRIER_BLOCK_H = 10
 
-# ── NEW: Dive bomber constants ────────────────────────────────────────────────
+# ── Dive bomber constants ─────────────────────────────────────────────────────
 DIVE_INTERVAL_MIN = 14.0
 DIVE_INTERVAL_MAX = 28.0
 DIVE_SPEED = 520
 
-# ── NEW: Difficulty settings ──────────────────────────────────────────────────
+# ── Boss constants ────────────────────────────────────────────────────────────
+# IMPROVEMENT 6: Boss wave every 5th level
+BOSS_WAVE_INTERVAL = 5
+
+# ── Difficulty settings ───────────────────────────────────────────────────────
 DIFFICULTIES = ["Easy", "Normal", "Hard"]
 DIFFICULTY_SETTINGS = {
     "Easy":   {"speed": 0.70, "fire_rate": 0.60, "powerup": 0.10, "bullet_speed": 0.70},
@@ -173,7 +181,6 @@ def _make_level_up_sfx(volume=0.25):
     sound.set_volume(volume)
     return sound
 
-# ── NEW sounds ────────────────────────────────────────────────────────────────
 def _make_bomb_sfx(volume=0.30):
     """Deep screen-clearing boom."""
     sample_rate = 44100
@@ -211,6 +218,48 @@ def _make_ufo_sfx(volume=0.12):
 def _make_dive_sfx(volume=0.15):
     """Quick whoosh when a dive-bomber breaks formation."""
     return _make_sweep(180, 640, 220, volume)
+
+def _make_boss_sfx(volume=0.28):
+    """Deep ominous boss arrival sweep."""
+    sample_rate = 44100
+    n_samples = int(sample_rate * 0.9)
+    buf = array("h", [0] * n_samples)
+    max_amp = int(32767 * volume)
+    for i in range(n_samples):
+        t = i / sample_rate
+        p = i / n_samples
+        env = math.exp(-1.5 * p) * min(1.0, i / 500)
+        freq = 220 - 120 * p
+        val = int(max_amp * (math.sin(2 * math.pi * freq * t) * 0.6 +
+                             math.sin(2 * math.pi * freq * 0.5 * t) * 0.4) * env)
+        buf[i] = max(-32768, min(32767, val))
+    sound = pygame.mixer.Sound(buffer=buf)
+    sound.set_volume(volume)
+    return sound
+
+def _make_extra_life_sfx(volume=0.30):
+    """Bright ascending arpeggio for extra life."""
+    sample_rate = 44100
+    notes = [523.25, 659.25, 783.99, 1046.50, 1318.51]
+    note_dur = int(sample_rate * 0.07)
+    n_samples = note_dur * len(notes) + int(sample_rate * 0.2)
+    buf = array("h", [0] * n_samples)
+    max_amp = int(32767 * volume)
+    for ni, freq in enumerate(notes):
+        start = ni * note_dur
+        dur = note_dur + int(sample_rate * 0.12)
+        for i in range(dur):
+            idx = start + i
+            if idx >= n_samples:
+                break
+            t = i / sample_rate
+            p = i / dur
+            env = (1 - p) ** 1.2 * min(1.0, i / 150)
+            val = int(max_amp * math.sin(2 * math.pi * freq * t) * env)
+            buf[idx] = max(-32768, min(32767, buf[idx] + val))
+    sound = pygame.mixer.Sound(buffer=buf)
+    sound.set_volume(volume)
+    return sound
 
 def _make_ambient_loop(volume=0.06):
     """
@@ -272,6 +321,8 @@ SFX_UFO_BEACON   = _make_ufo_sfx(0.12)
 SFX_UFO_HIT      = _make_sweep(800, 150, 350, 0.28)
 SFX_BOMB         = _make_bomb_sfx(0.30)
 SFX_DIVE         = _make_dive_sfx(0.15)
+SFX_BOSS         = _make_boss_sfx(0.28)
+SFX_EXTRA_LIFE   = _make_extra_life_sfx(0.30)
 MUSIC_LOOP       = _make_ambient_loop(0.06)
 
 MUSIC_CHANNEL    = pygame.mixer.Channel(14)
@@ -395,12 +446,10 @@ class PowerUp:
             a = self.angle + i * math.pi / 2
             pts.append((cx + int(r * math.cos(a)), cy + int(r * math.sin(a))))
         pygame.draw.polygon(surface, self.colour, pts)
+        # Label on the powerup so players know what it is
         glow = pygame.Surface((44, 44), pygame.SRCALPHA)
         pygame.draw.circle(glow, (*self.colour, 50), (22, 22), 22)
         surface.blit(glow, (cx - 22, cy - 22))
-        # Bomb gets a special "B" label
-        if self.kind == "bomb":
-            pass  # the orange colour is distinctive enough
 
 # ── Achievement Banner ────────────────────────────────────────────────────────
 class AchievementBanner:
@@ -454,7 +503,7 @@ class ComboPopup:
         surface.blit(scaled, (int(self.x) + offset[0] - scaled.get_width() // 2,
                               int(self.y) + offset[1] - scaled.get_height() // 2))
 
-# ── NEW: UFO ──────────────────────────────────────────────────────────────────
+# ── UFO ───────────────────────────────────────────────────────────────────────
 class UFO:
     def __init__(self):
         if random.random() < 0.5:
@@ -496,7 +545,7 @@ class UFO:
         pygame.draw.ellipse(glow, (*RED, 28), (0, 0, 110, 52))
         surface.blit(glow, (cx - 55, cy - 22))
 
-# ── NEW: Barrier ──────────────────────────────────────────────────────────────
+# ── Barrier ───────────────────────────────────────────────────────────────────
 _BARRIER_SHAPE = [
     "XXXXXXXXXX",
     "XXXXXXXXXX",
@@ -518,14 +567,23 @@ class Barrier:
             for col_i, ch in enumerate(row):
                 if ch == "X":
                     self.blocks.append([ox + col_i * bw, oy + row_i * bh, 3])
+        # IMPROVEMENT 8: Track last destroyed block center for particle spawning
+        self.last_destroyed = None
 
     def check_bullet_hit(self, bx, by):
+        self.last_destroyed = None
         for block in self.blocks:
             if block[2] <= 0:
                 continue
             if block[0] <= bx <= block[0] + BARRIER_BLOCK_W and \
                block[1] <= by <= block[1] + BARRIER_BLOCK_H:
                 block[2] -= 1
+                if block[2] == 0:
+                    # Store center position so Game can spawn debris particles
+                    self.last_destroyed = (
+                        block[0] + BARRIER_BLOCK_W // 2,
+                        block[1] + BARRIER_BLOCK_H // 2
+                    )
                 return True
         return False
 
@@ -548,7 +606,7 @@ class Barrier:
             # Thin top highlight
             pygame.draw.rect(surface, WHITE, (rect.x, rect.y, rect.width, 2))
 
-# ── NEW: Dive Bomber ──────────────────────────────────────────────────────────
+# ── Dive Bomber ───────────────────────────────────────────────────────────────
 class DiveBomber:
     def __init__(self, alien):
         self.x = alien["x"]
@@ -595,6 +653,109 @@ class DiveBomber:
         trail = pygame.Surface((50, 60), pygame.SRCALPHA)
         pygame.draw.ellipse(trail, (*self.colour, 35), (0, 0, 50, 60))
         surface.blit(trail, (int(self.x) + ox - 25, int(self.y) + oy - 30))
+
+# ── Boss ──────────────────────────────────────────────────────────────────────
+# IMPROVEMENT 6: Boss that appears every BOSS_WAVE_INTERVAL waves
+class Boss:
+    def __init__(self, wave):
+        self.x = float(WIDTH // 2)
+        self.y = 195.0
+        self.base_y = 195.0
+        self.wave_timer = 0.0
+        boss_tier = max(1, wave // BOSS_WAVE_INTERVAL)
+        self.max_hp = 12 + boss_tier * 8
+        self.hp = self.max_hp
+        self.alive = True
+        self.vx = min(180 + boss_tier * 25, 360)
+        self.shoot_timer = 1.8   # Initial delay before first shot
+        self.anim_timer = 0.0
+        self.anim_frame = 0
+        self.hit_flash = 0.0
+
+    def is_phase2(self):
+        return self.hp <= self.max_hp // 2
+
+    def update(self, dt):
+        self.wave_timer += dt
+        self.anim_timer += dt
+        if self.anim_timer >= 0.20:
+            self.anim_timer = 0.0
+            self.anim_frame = 1 - self.anim_frame
+        self.x += self.vx * dt
+        self.y = self.base_y + 40.0 * math.sin(self.wave_timer * 1.6)
+        if self.x > WIDTH - 140 or self.x < 140:
+            self.vx *= -1
+        if self.hit_flash > 0:
+            self.hit_flash -= dt
+        self.shoot_timer -= dt
+
+    def should_shoot(self):
+        interval = 0.42 if self.is_phase2() else 0.72
+        if self.shoot_timer <= 0:
+            self.shoot_timer = interval + random.uniform(-0.08, 0.08)
+            return True
+        return False
+
+    def take_hit(self):
+        self.hp -= 1
+        self.hit_flash = 0.14
+        if self.hp <= 0:
+            self.alive = False
+            return True
+        return False
+
+    def draw(self, surface, offset):
+        ox, oy = offset
+        cx, cy = int(self.x) + ox, int(self.y) + oy
+        flashing = self.hit_flash > 0
+        phase2 = self.is_phase2()
+
+        # Outer glow
+        glow_col = (255, 50, 50, 22) if phase2 else (255, 0, 255, 18)
+        glow = pygame.Surface((280, 140), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, glow_col, (0, 0, 280, 140))
+        surface.blit(glow, (cx - 140, cy - 70))
+
+        hull_col = WHITE if flashing else (RED if phase2 else HOT_PINK)
+        dome_col = WHITE if flashing else (ORANGE if phase2 else HOT_PINK)
+
+        # Phase 2: spinning threat spokes
+        if phase2:
+            for spoke in range(8):
+                a = math.radians(spoke * 45 + self.wave_timer * 55)
+                sx = cx + int(118 * math.cos(a))
+                sy = cy + int(30 * math.sin(a))
+                pygame.draw.line(surface, (*RED, 120), (cx, cy), (sx, sy), 1)
+
+        # Main hull
+        pygame.draw.ellipse(surface, hull_col, (cx - 110, cy - 22, 220, 60))
+        # Inner hull panel
+        pygame.draw.ellipse(surface, BG,       (cx - 88,  cy - 12, 176, 40))
+        pygame.draw.ellipse(surface, hull_col, (cx - 88,  cy - 12, 176, 40), 2)
+
+        # Dome
+        pygame.draw.ellipse(surface, dome_col, (cx - 60,  cy - 68, 120, 62))
+        # Cockpit glass
+        pygame.draw.ellipse(surface, CYAN,     (cx - 30,  cy - 60,  60, 38))
+        glass_glow = pygame.Surface((60, 38), pygame.SRCALPHA)
+        pygame.draw.ellipse(glass_glow, (*CYAN, 70), (0, 0, 60, 38))
+        surface.blit(glass_glow, (cx - 30, cy - 60))
+
+        # Blinking engine lights
+        lc = YELLOW if self.anim_frame == 0 else ORANGE
+        for lx in [-80, -52, -24, 4, 32, 60, 80]:
+            pygame.draw.circle(surface, lc, (cx + lx, cy + 22), 6)
+
+        # HP bar above boss
+        bar_w = 220
+        bar_h = 12
+        hp_frac = self.hp / self.max_hp
+        bar_col = LIME if hp_frac > 0.5 else YELLOW if hp_frac > 0.25 else RED
+        bx = cx - bar_w // 2
+        by_ = cy - 92
+        pygame.draw.rect(surface, (25, 25, 25), (bx, by_, bar_w, bar_h), border_radius=4)
+        pygame.draw.rect(surface, bar_col,      (bx, by_, int(bar_w * hp_frac), bar_h), border_radius=4)
+        pygame.draw.rect(surface, WHITE,         (bx, by_, bar_w, bar_h), 1, border_radius=4)
 
 # ── Draw helpers ──────────────────────────────────────────────────────────────
 def draw_ship(surface, x, y, colour, size=1.0):
@@ -736,7 +897,6 @@ class Game:
         self.name_cursor = 0
         self.pending_score = 0
 
-        # NEW: difficulty + bomb flash
         self.difficulty = "Normal"
         self.bomb_flash_timer = 0.0
 
@@ -793,15 +953,26 @@ class Game:
         self.shots_hit = 0
         self.wave_damage_taken = False
         self.powerups_collected_wave = 0
-        self.level_splash_timer = 0
         self.bomb_flash_timer = 0.0
-        # NEW fields
         self.ufo = None
         self.ufo_timer = random.uniform(UFO_INTERVAL_MIN, UFO_INTERVAL_MAX)
         self.barriers = self._make_barriers()
         self.dive_bombers = []
         self.dive_timer = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
         self.powerup_drop_chance = DIFFICULTY_SETTINGS[self.difficulty]["powerup"]
+
+        # IMPROVEMENT 2: Extra life milestone tracking
+        self.next_life_milestone_idx = 0
+
+        # IMPROVEMENT 6: Boss tracking
+        self.boss = None
+
+        # IMPROVEMENT 7: Wave summary state
+        self.wave_summary_timer = 0.0
+        self.wave_summary_data = {}
+        self.wave_kills = 0
+        self.wave_start_time = pygame.time.get_ticks() / 1000.0
+
         self._spawn_wave()
 
     def _make_barriers(self):
@@ -815,17 +986,25 @@ class Game:
 
     def _spawn_wave(self):
         self.aliens = []
-        y_offset = min((self.wave - 1) * 8, 100)
-        rows = min(7, ALIEN_ROWS + (self.wave - 1) // 8)
-        for row in range(rows):
-            for col in range(ALIEN_COLS):
-                ax = ALIEN_X_START + col * ALIEN_X_SPACING
-                ay = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset
-                colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
-                self.aliens.append({"x": ax, "y": ay, "colour": colour})
-        self.alien_dir = 1
+        self.boss = None
 
         diff = DIFFICULTY_SETTINGS[self.difficulty]
+
+        # IMPROVEMENT 6: Boss every BOSS_WAVE_INTERVAL waves
+        if self.wave % BOSS_WAVE_INTERVAL == 0:
+            self.boss = Boss(self.wave)
+            SFX_BOSS.play()
+        else:
+            y_offset = min((self.wave - 1) * 8, 100)
+            rows = min(7, ALIEN_ROWS + (self.wave - 1) // 8)
+            for row in range(rows):
+                for col in range(ALIEN_COLS):
+                    ax = ALIEN_X_START + col * ALIEN_X_SPACING
+                    ay = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset
+                    colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
+                    self.aliens.append({"x": ax, "y": ay, "colour": colour})
+
+        self.alien_dir = 1
         self.alien_speed = ALIEN_START_SPEED * (1 + 0.05 * (self.wave - 1)) * diff["speed"]
         self.enemy_shoot_interval = max(
             0.4, (ENEMY_SHOOT_INTERVAL - 0.15 * (self.wave - 1)) / diff["fire_rate"]
@@ -841,9 +1020,11 @@ class Game:
         self.powerups_collected_wave = 0
         self.shots_fired = 0
         self.shots_hit = 0
-        # Reset dive timer each wave (wave 2+)
         self.dive_bombers = []
         self.dive_timer = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
+        # IMPROVEMENT 7: Per-wave tracking
+        self.wave_kills = 0
+        self.wave_start_time = pygame.time.get_ticks() / 1000.0
 
     def _add_shake(self, intensity, duration):
         self.shake_intensity = intensity
@@ -879,10 +1060,23 @@ class Game:
         self.dive_bombers = []
         self.enemy_bullets = []
         self.score += pts
+        self._check_life_milestones()
         self._add_shake(12, 0.5)
         SFX_BOMB.play()
         self.bomb_flash_timer = 0.18
         self._try_achievement("Nuclear Option")
+
+    # IMPROVEMENT 2: Check and award extra lives on score milestones
+    def _check_life_milestones(self):
+        while (self.next_life_milestone_idx < len(EXTRA_LIFE_MILESTONES) and
+               self.score >= EXTRA_LIFE_MILESTONES[self.next_life_milestone_idx]):
+            self.lives += 1
+            self.next_life_milestone_idx += 1
+            SFX_EXTRA_LIFE.play()
+            self.banners.append(AchievementBanner("EXTRA LIFE!", self.font_sm))
+            self.combo_popups.append(ComboPopup(
+                WIDTH // 2, HEIGHT // 2, 0, self.font_med, text="+1 LIFE!"
+            ))
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     def run(self):
@@ -911,6 +1105,8 @@ class Game:
                 pass   # freeze — only banners/particles still rendered
             elif self.state == "GAME_OVER":
                 self._update_gameover(dt)
+            elif self.state == "WAVE_SUMMARY":
+                self._update_wave_summary(dt)
 
             self._draw()
 
@@ -932,7 +1128,6 @@ class Game:
                 idx = self.unlocked_ships.index(self.selected_ship) if self.selected_ship in self.unlocked_ships else 0
                 idx = (idx + 1) % len(self.unlocked_ships)
                 self.selected_ship = self.unlocked_ships[idx]
-            # NEW: UP/DOWN cycle difficulty
             elif event.key == pygame.K_UP:
                 idx = DIFFICULTIES.index(self.difficulty)
                 self.difficulty = DIFFICULTIES[(idx - 1) % len(DIFFICULTIES)]
@@ -941,7 +1136,6 @@ class Game:
                 self.difficulty = DIFFICULTIES[(idx + 1) % len(DIFFICULTIES)]
 
         elif self.state == "PLAYING":
-            # NEW: Pause
             if event.key == pygame.K_p:
                 self.state = "PAUSED"
                 MUSIC_CHANNEL.pause()
@@ -954,6 +1148,11 @@ class Game:
                 MUSIC_CHANNEL.unpause()
                 if self.ufo and self.ufo.alive:
                     UFO_CHANNEL.unpause()
+
+        # IMPROVEMENT 7: Skip wave summary early with SPACE or ENTER
+        elif self.state == "WAVE_SUMMARY":
+            if event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                self.wave_summary_timer = 0.0
 
         elif self.state == "GAME_OVER":
             if self.entering_name:
@@ -969,6 +1168,13 @@ class Game:
                     self.name_cursor = min(2, self.name_cursor + 1)
                 elif event.key == pygame.K_LEFT:
                     self.name_cursor = max(0, self.name_cursor - 1)
+                # IMPROVEMENT 9: Keyboard name entry — type letters directly
+                elif pygame.K_a <= event.key <= pygame.K_z:
+                    letter = chr(event.key - pygame.K_a + ord('A'))
+                    self.name_chars[self.name_cursor] = letter
+                    self.name_cursor = min(2, self.name_cursor + 1)
+                elif event.key == pygame.K_BACKSPACE and self.name_cursor > 0:
+                    self.name_cursor -= 1
                 elif event.key == pygame.K_RETURN:
                     name = "".join(self.name_chars)
                     self.hs_data = save_highscore(name, self.pending_score)
@@ -983,23 +1189,28 @@ class Game:
         self.title_pulse += dt * 3
         self.particles = [p for p in self.particles if p.update(dt)]
 
+    # ── Wave Summary ──────────────────────────────────────────────────────────
+    # IMPROVEMENT 7: Show stats between waves
+    def _update_wave_summary(self, dt):
+        self.wave_summary_timer -= dt
+        self.particles   = [p for p in self.particles if p.update(dt)]
+        self.combo_popups = [c for c in self.combo_popups if c.update(dt)]
+        alive_banners = []
+        for i, b in enumerate(self.banners):
+            if b.update(dt, i):
+                alive_banners.append(b)
+        self.banners = alive_banners
+
+        if self.wave_summary_timer <= 0:
+            self._spawn_wave()
+            self.state = "PLAYING"
+            MUSIC_CHANNEL.unpause()
+
     # ── Playing ───────────────────────────────────────────────────────────────
     def _update_playing(self, dt):
         # Bomb flash countdown (visual only)
         if self.bomb_flash_timer > 0:
             self.bomb_flash_timer -= dt
-
-        # Level splash delay
-        if self.level_splash_timer > 0:
-            self.level_splash_timer -= dt
-            self.particles   = [p for p in self.particles if p.update(dt)]
-            self.combo_popups = [c for c in self.combo_popups if c.update(dt)]
-            alive_banners = []
-            for i, b in enumerate(self.banners):
-                if b.update(dt, i):
-                    alive_banners.append(b)
-            self.banners = alive_banners
-            return
 
         keys = pygame.key.get_pressed()
 
@@ -1047,19 +1258,34 @@ class Game:
         self.bullets = alive_bullets
 
         # ── Player bullets vs barriers ────────────────────────────────────
+        # IMPROVEMENT 8: Spawn debris particles when blocks are destroyed
         barrier_blocked = set()
         for bi, b in enumerate(self.bullets):
             for barrier in self.barriers:
                 if barrier.check_bullet_hit(b["x"], b["y"]):
                     barrier_blocked.add(bi)
+                    if barrier.last_destroyed:
+                        dx2, dy2 = barrier.last_destroyed
+                        for _ in range(5):
+                            self.particles.append(Particle(
+                                dx2, dy2, LIME,
+                                speed=random.uniform(50, 140),
+                                size=random.uniform(2, 4),
+                                life=random.uniform(0.2, 0.4)))
                     break
         if barrier_blocked:
             self.bullets = [b for i, b in enumerate(self.bullets) if i not in barrier_blocked]
 
-        # ── Alien animation ───────────────────────────────────────────────
+        # ── IMPROVEMENT 4: Alien animation speed tied to remaining count ──
+        # Fewer aliens → faster animation (classic Space Invaders tension)
+        total_aliens_this_wave = ALIEN_COLS * min(7, ALIEN_ROWS + (self.wave - 1) // 8)
+        if self.aliens:
+            anim_threshold = max(0.08, 0.5 * (len(self.aliens) / max(1, total_aliens_this_wave)))
+        else:
+            anim_threshold = 0.15
         self.alien_anim_timer += dt
-        if self.alien_anim_timer > 0.5:
-            self.alien_anim_timer -= 0.5
+        if self.alien_anim_timer > anim_threshold:
+            self.alien_anim_timer -= anim_threshold
             self.alien_frame = 1 - self.alien_frame
 
         # ── Move aliens ───────────────────────────────────────────────────
@@ -1075,24 +1301,69 @@ class Game:
                     a["y"] += self.current_alien_drop
                 self.alien_speed += 5
 
-        # ── Enemy shooting ────────────────────────────────────────────────
+        # ── IMPROVEMENT 3: Only bottom-row aliens shoot ───────────────────
+        # Build a set of the lowest alien in each column
         if self.aliens:
             self.enemy_shoot_timer -= dt
             if self.enemy_shoot_timer <= 0:
-                shooter = random.choice(self.aliens)
-                self.enemy_bullets.append({
-                    "x": shooter["x"],
-                    "y": shooter["y"] + 20,
-                    "vy": self.enemy_bullet_speed
-                })
-                SFX_ENEMY_SHOOT.play()
+                # Group by approximate column, find the lowest alien in each
+                col_bottoms = {}
+                for a in self.aliens:
+                    col_key = round(a["x"] / ALIEN_X_SPACING)
+                    if col_key not in col_bottoms or a["y"] > col_bottoms[col_key]["y"]:
+                        col_bottoms[col_key] = a
+                if col_bottoms:
+                    shooter = random.choice(list(col_bottoms.values()))
+                    self.enemy_bullets.append({
+                        "x": shooter["x"],
+                        "y": shooter["y"] + 20,
+                        "vx": 0,
+                        "vy": self.enemy_bullet_speed
+                    })
+                    SFX_ENEMY_SHOOT.play()
                 self.enemy_shoot_timer = self.enemy_shoot_interval + random.uniform(-0.3, 0.3)
 
-        # ── Move enemy bullets ────────────────────────────────────────────
+        # ── IMPROVEMENT 6: Boss update & shooting ─────────────────────────
+        if self.boss and self.boss.alive:
+            self.boss.update(dt)
+            if self.boss.should_shoot():
+                if self.boss.is_phase2():
+                    # Phase 2: 3-way aimed spread shot
+                    for spread_angle in [-0.22, 0, 0.22]:
+                        raw_dx = self.player_x - self.boss.x
+                        raw_dy = self.player_y - self.boss.y
+                        dist = max(1.0, math.sqrt(raw_dx**2 + raw_dy**2))
+                        spd = self.enemy_bullet_speed * 1.1
+                        base_vx = (raw_dx / dist) * spd
+                        base_vy = (raw_dy / dist) * spd
+                        ca = math.cos(spread_angle)
+                        sa = math.sin(spread_angle)
+                        self.enemy_bullets.append({
+                            "x": self.boss.x,
+                            "y": self.boss.y + 35,
+                            "vx": base_vx * ca - base_vy * sa,
+                            "vy": base_vx * sa + base_vy * ca
+                        })
+                else:
+                    # Phase 1: single aimed shot
+                    raw_dx = self.player_x - self.boss.x
+                    raw_dy = self.player_y - self.boss.y
+                    dist = max(1.0, math.sqrt(raw_dx**2 + raw_dy**2))
+                    spd = self.enemy_bullet_speed * 1.2
+                    self.enemy_bullets.append({
+                        "x": self.boss.x,
+                        "y": self.boss.y + 35,
+                        "vx": (raw_dx / dist) * spd,
+                        "vy": (raw_dy / dist) * spd
+                    })
+                SFX_ENEMY_SHOOT.play()
+
+        # ── Move enemy bullets (supports vx for boss aimed shots) ─────────
         alive_enemy_bullets = []
         for eb in self.enemy_bullets:
+            eb["x"] += eb.get("vx", 0) * dt
             eb["y"] += eb["vy"] * dt
-            if eb["y"] < HEIGHT + 20:
+            if 0 < eb["y"] < HEIGHT + 20 and 0 < eb["x"] < WIDTH + 50:
                 alive_enemy_bullets.append(eb)
         self.enemy_bullets = alive_enemy_bullets
 
@@ -1102,6 +1373,14 @@ class Game:
             for barrier in self.barriers:
                 if barrier.check_bullet_hit(eb["x"], eb["y"]):
                     enemy_barrier_blocked.add(ei)
+                    if barrier.last_destroyed:
+                        dx2, dy2 = barrier.last_destroyed
+                        for _ in range(4):
+                            self.particles.append(Particle(
+                                dx2, dy2, RED,
+                                speed=random.uniform(40, 110),
+                                size=random.uniform(2, 3),
+                                life=random.uniform(0.15, 0.3)))
                     break
         if enemy_barrier_blocked:
             self.enemy_bullets = [eb for i, eb in enumerate(self.enemy_bullets)
@@ -1115,7 +1394,8 @@ class Game:
                 self._spawn_explosion(self.player_x, self.player_y, RED, count=8)
                 self._player_hit()
         for ei in sorted(hit_indices, reverse=True):
-            self.enemy_bullets.pop(ei)
+            if ei < len(self.enemy_bullets):
+                self.enemy_bullets.pop(ei)
 
         # ── UFO: spawn timer ──────────────────────────────────────────────
         if self.ufo is None:
@@ -1144,6 +1424,7 @@ class Game:
                         text=f"+{pts}!"
                     ))
                     self.score += pts
+                    self._check_life_milestones()
                     self._add_shake(5, 0.2)
                     SFX_UFO_HIT.play()
                     UFO_CHANNEL.stop()
@@ -1209,7 +1490,9 @@ class Game:
             self.combo_multiplier = min(5, 1 + self.combo_count // 2)
             pts = 10 * self.combo_multiplier
             self.score += pts
+            self._check_life_milestones()
             self.shots_hit += 1
+            self.wave_kills += 1
             self._spawn_explosion(a["x"], a["y"], a["colour"])
             self._add_shake(3, 0.1)
             SFX_EXPLODE.play()
@@ -1237,9 +1520,49 @@ class Game:
                     SFX_EXPLODE.play()
                     pts = 50 * self.combo_multiplier
                     self.score += pts
+                    self._check_life_milestones()
                     self.combo_count += 1
                     self.combo_timer = COMBO_WINDOW
                     self.combo_multiplier = min(5, 1 + self.combo_count // 2)
+                    self.wave_kills += 1
+                    break
+
+        # ── IMPROVEMENT 6: Player bullets vs boss ─────────────────────────
+        if self.boss and self.boss.alive:
+            for bi, b in enumerate(self.bullets):
+                if bi in bullets_hit:
+                    continue
+                if abs(b["x"] - self.boss.x) < 108 and abs(b["y"] - self.boss.y) < 42:
+                    bullets_hit.add(bi)
+                    self.shots_hit += 1
+                    killed = self.boss.take_hit()
+                    self._add_shake(3, 0.1)
+                    SFX_EXPLODE.play()
+                    if killed:
+                        pts = 500 + self.wave * 50
+                        self.score += pts
+                        self._check_life_milestones()
+                        self.combo_popups.append(ComboPopup(
+                            int(self.boss.x), int(self.boss.y), 0,
+                            self.font_med, text=f"+{pts}!"
+                        ))
+                        # Big multi-stage explosion
+                        for _ in range(3):
+                            ox_ = random.randint(-60, 60)
+                            oy_ = random.randint(-30, 30)
+                            self._spawn_explosion(int(self.boss.x) + ox_,
+                                                  int(self.boss.y) + oy_, RED, count=18)
+                        self._spawn_explosion(int(self.boss.x), int(self.boss.y), GOLD, count=30)
+                        self._spawn_explosion(int(self.boss.x), int(self.boss.y), WHITE, count=20)
+                        # Drop 3 power-ups
+                        for i in range(3):
+                            self.powerups.append(PowerUp(
+                                int(self.boss.x) + random.randint(-100, 100),
+                                int(self.boss.y)
+                            ))
+                        self._add_shake(16, 0.7)
+                        self.boss = None
+                        self._try_achievement("Boss Slayer")
                     break
 
         for bi in sorted(bullets_hit, reverse=True):
@@ -1260,7 +1583,6 @@ class Game:
                     if pu.kind == "shield":
                         self.has_shield = True
                     elif pu.kind == "bomb":
-                        # Instant: detonate everything on screen
                         self._trigger_bomb()
                         self._try_achievement("Nuclear Option")
                     else:
@@ -1299,23 +1621,47 @@ class Game:
             self.shake_timer -= dt
 
         # ── Wave clear ────────────────────────────────────────────────────
-        if not self.aliens and not self.dive_bombers:
+        # IMPROVEMENT 6: Also wait for boss to be defeated
+        if not self.aliens and not self.dive_bombers and self.boss is None:
             if not self.wave_damage_taken:
                 self._try_achievement("Untouchable")
             if self.shots_fired > 0 and self.shots_hit / self.shots_fired >= 0.9:
                 self._try_achievement("Sharp Shooter")
+
+            cleared_wave = self.wave
             self.wave += 1
             if self.wave == 5:
                 self._try_achievement("Wave 5")
             if self.wave == 10:
                 self._try_achievement("Wave 10")
             SFX_LEVEL_UP.play()
-            self.level_splash_timer = 1.5
-            self._spawn_wave()
+
+            # IMPROVEMENT 7: Compute wave summary before spawning next wave
+            elapsed = pygame.time.get_ticks() / 1000.0 - self.wave_start_time
+            accuracy = (self.shots_hit / self.shots_fired * 100) if self.shots_fired > 0 else 0.0
+            perfect_bonus = 500 if not self.wave_damage_taken else 0
+            acc_bonus = int(accuracy * 5) if accuracy >= 90.0 else 0
+            if perfect_bonus + acc_bonus > 0:
+                self.score += perfect_bonus + acc_bonus
+                self._check_life_milestones()
+            self.wave_summary_data = {
+                "wave": cleared_wave,
+                "kills": self.wave_kills,
+                "accuracy": accuracy,
+                "time": elapsed,
+                "perfect_bonus": perfect_bonus,
+                "acc_bonus": acc_bonus,
+            }
+            self.wave_summary_timer = 3.5
+            self.state = "WAVE_SUMMARY"
+            MUSIC_CHANNEL.pause()
 
     def _player_hit(self):
+        # IMPROVEMENT 5: Set invincible immediately to prevent multi-hit in same frame
         if self.invincible_timer > 0:
             return
+        self.invincible_timer = 0.01   # Block any further hits this frame
+
         if self.has_shield:
             self.has_shield = False
             self._spawn_explosion(self.player_x, self.player_y, BLUE, count=20)
@@ -1378,6 +1724,9 @@ class Game:
             self._draw_paused()
         elif self.state == "GAME_OVER":
             self._draw_gameover(offset)
+        elif self.state == "WAVE_SUMMARY":
+            self._draw_playing(offset)
+            self._draw_wave_summary()
 
         for p in self.particles:
             p.draw(self.screen, offset)
@@ -1413,7 +1762,7 @@ class Game:
         ship_label = self.font_sm.render(f"< {self.selected_ship} >", True, WHITE)
         self.screen.blit(ship_label, (WIDTH // 2 - ship_label.get_width() // 2, 420))
 
-        # ── NEW: Difficulty selector ──────────────────────────────────────
+        # Difficulty selector
         diff_y = 462
         diff_parts = []
         for i, d in enumerate(DIFFICULTIES):
@@ -1473,6 +1822,27 @@ class Game:
     def _draw_playing(self, offset):
         ox, oy = offset
 
+        # ── IMPROVEMENT 10: Alarm border when aliens approach the player ──
+        if self.aliens:
+            max_alien_y = max(a["y"] for a in self.aliens)
+            danger_zone = HEIGHT - 350
+            if max_alien_y > danger_zone:
+                danger_frac = min(1.0, (max_alien_y - danger_zone) / 250)
+                pulse_alpha = int(60 + 80 * abs(math.sin(pygame.time.get_ticks() / 180)))
+                border_alpha = int(pulse_alpha * danger_frac)
+                if border_alpha > 0:
+                    border_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                    bw = 14
+                    pygame.draw.rect(border_surf, (255, 30, 30, border_alpha),
+                                     (0, 0, WIDTH, bw))
+                    pygame.draw.rect(border_surf, (255, 30, 30, border_alpha),
+                                     (0, HEIGHT - bw, WIDTH, bw))
+                    pygame.draw.rect(border_surf, (255, 30, 30, border_alpha),
+                                     (0, 0, bw, HEIGHT))
+                    pygame.draw.rect(border_surf, (255, 30, 30, border_alpha),
+                                     (WIDTH - bw, 0, bw, HEIGHT))
+                    self.screen.blit(border_surf, (0, 0))
+
         # ── Barriers ─────────────────────────────────────────────────────
         for barrier in self.barriers:
             barrier.draw(self.screen, offset)
@@ -1499,6 +1869,10 @@ class Game:
         # ── Dive bombers ──────────────────────────────────────────────────
         for diver in self.dive_bombers:
             diver.draw(self.screen, offset)
+
+        # ── IMPROVEMENT 6: Draw boss ──────────────────────────────────────
+        if self.boss and self.boss.alive:
+            self.boss.draw(self.screen, offset)
 
         # ── UFO ───────────────────────────────────────────────────────────
         if self.ufo:
@@ -1529,20 +1903,15 @@ class Game:
         # ── Power-ups ─────────────────────────────────────────────────────
         for pu in self.powerups:
             pu.draw(self.screen, offset)
+            # Label overlay so player knows what the powerup does
+            lbl = self.font_xs.render(POWERUP_LABELS.get(pu.kind, ""), True, pu.colour)
+            lx = int(pu.x) + ox - lbl.get_width() // 2
+            ly = int(pu.y) + oy + 22
+            self.screen.blit(lbl, (lx, ly))
 
         # ── Combo popups ──────────────────────────────────────────────────
         for cp in self.combo_popups:
             cp.draw(self.screen, offset)
-
-        # ── Level splash overlay ──────────────────────────────────────────
-        if self.level_splash_timer > 0:
-            alpha = min(1.0, self.level_splash_timer / 0.3)
-            if self.level_splash_timer < 0.3:
-                alpha = self.level_splash_timer / 0.3
-            lv_txt = self.font_big.render(f"LEVEL {self.wave}", True, GOLD)
-            lv_txt.set_alpha(int(255 * alpha))
-            self.screen.blit(lv_txt, (WIDTH // 2 - lv_txt.get_width() // 2,
-                                       HEIGHT // 2 - lv_txt.get_height() // 2))
 
         self._draw_hud()
 
@@ -1562,15 +1931,20 @@ class Game:
 
         # Level counter (centre-top)
         lv_str = f"LEVEL {self.wave}"
-        lv_txt = self.font_lv.render(lv_str, True, GOLD)
+        # IMPROVEMENT 6: Show BOSS label during boss wave
+        is_boss_wave = (self.wave % BOSS_WAVE_INTERVAL == 0)
+        if is_boss_wave and self.boss:
+            lv_str = f"BOSS  WAVE  {self.wave}"
+        lv_col = RED if is_boss_wave and self.boss else GOLD
+        lv_txt = self.font_lv.render(lv_str, True, lv_col)
         lv_w, lv_h = lv_txt.get_size()
         lv_x = WIDTH // 2 - lv_w // 2
         lv_y = 6
         lv_panel = pygame.Surface((lv_w + 30, lv_h + 10), pygame.SRCALPHA)
         pygame.draw.rect(lv_panel, (0, 0, 0, 100), (0, 0, lv_w + 30, lv_h + 10), border_radius=8)
-        pygame.draw.rect(lv_panel, (*GOLD, 120), (0, 0, lv_w + 30, lv_h + 10), 2, border_radius=8)
+        pygame.draw.rect(lv_panel, (*lv_col, 120), (0, 0, lv_w + 30, lv_h + 10), 2, border_radius=8)
         self.screen.blit(lv_panel, (lv_x - 15, lv_y - 2))
-        glow_txt = self.font_lv.render(lv_str, True, (*GOLD[:3],))
+        glow_txt = self.font_lv.render(lv_str, True, (*lv_col[:3],))
         glow_txt.set_alpha(60)
         self.screen.blit(glow_txt, (lv_x + 2, lv_y + 2))
         self.screen.blit(lv_txt, (lv_x, lv_y))
@@ -1586,6 +1960,13 @@ class Game:
         diff_badge = self.font_xs.render(self.difficulty.upper(), True, diff_colour)
         self.screen.blit(diff_badge, (WIDTH - diff_badge.get_width() - 16, 52))
 
+        # IMPROVEMENT 1: Alien counter
+        if self.aliens:
+            alien_count_txt = self.font_xs.render(
+                f"\u25a0 x{len(self.aliens)}", True, HOT_PINK
+            )
+            self.screen.blit(alien_count_txt, (WIDTH - alien_count_txt.get_width() - 16, 70))
+
         # Powerup timer bar
         if self.active_powerup and self.powerup_timer > 0:
             label = POWERUP_LABELS.get(self.active_powerup, "")
@@ -1600,15 +1981,13 @@ class Game:
             sh = self.font_xs.render("SHIELD ACTIVE", True, BLUE)
             self.screen.blit(sh, (20, 78))
 
-        # ── NEW: Combo timer bar ──────────────────────────────────────────
+        # Combo timer bar
         if self.combo_count > 0 and self.combo_timer > 0:
             bar_x, bar_y = 20, 98
             bar_max_w = 280
             remaining = self.combo_timer / COMBO_WINDOW
-            # Dark background track
             pygame.draw.rect(self.screen, (50, 50, 0), (bar_x, bar_y, bar_max_w, 7),
                              border_radius=3)
-            # Pulsing fill
             pulse = int(190 + 65 * math.sin(pygame.time.get_ticks() / 90))
             fill_c = (pulse, pulse, 0)
             pygame.draw.rect(self.screen, fill_c,
@@ -1619,13 +1998,20 @@ class Game:
             lbl = self.font_xs.render("COMBO", True, YELLOW)
             self.screen.blit(lbl, (bar_x + bar_max_w + 8, bar_y - 4))
 
+        # IMPROVEMENT 2: Show next extra life milestone
+        if self.next_life_milestone_idx < len(EXTRA_LIFE_MILESTONES):
+            next_ms = EXTRA_LIFE_MILESTONES[self.next_life_milestone_idx]
+            needed = next_ms - self.score
+            if needed > 0:
+                life_txt = self.font_xs.render(f"+1 life at {next_ms}", True, DIM_WHITE)
+                self.screen.blit(life_txt, (20, 118))
+
     def _draw_paused(self):
         """Semi-transparent overlay shown when game is paused."""
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 150))
         self.screen.blit(overlay, (0, 0))
 
-        # Pulsing PAUSED text
         t = pygame.time.get_ticks() / 1000.0
         pulse = 0.92 + 0.08 * math.sin(t * 4)
         txt = self.font_big.render("PAUSED", True, CYAN)
@@ -1637,6 +2023,65 @@ class Game:
         hint = self.font_med.render("Press P or ENTER to resume", True, WHITE)
         self.screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2,
                                  HEIGHT // 2 + 60))
+
+    # IMPROVEMENT 7: Wave summary screen
+    def _draw_wave_summary(self):
+        d = self.wave_summary_data
+        if not d:
+            return
+
+        alpha = 220
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        panel_w, panel_h = 700, 400
+        panel_x = WIDTH // 2 - panel_w // 2
+        panel_y = HEIGHT // 2 - panel_h // 2
+
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        pygame.draw.rect(panel, (10, 10, 50, 220), (0, 0, panel_w, panel_h), border_radius=16)
+        pygame.draw.rect(panel, (*GOLD, 180), (0, 0, panel_w, panel_h), 2, border_radius=16)
+        self.screen.blit(panel, (panel_x, panel_y))
+
+        cx = WIDTH // 2
+
+        title_txt = self.font_big.render(f"WAVE  {d['wave']}  CLEAR!", True, GOLD)
+        self.screen.blit(title_txt, (cx - title_txt.get_width() // 2, panel_y + 24))
+
+        row_y = panel_y + 120
+        row_gap = 52
+
+        def stat_row(label, value, colour=WHITE):
+            nonlocal row_y
+            lbl = self.font_med.render(label, True, DIM_WHITE)
+            val = self.font_med.render(value, True, colour)
+            self.screen.blit(lbl, (cx - 280, row_y))
+            self.screen.blit(val, (cx + 160 - val.get_width(), row_y))
+            row_y += row_gap
+
+        stat_row("Enemies destroyed:", str(d["kills"]), LIME)
+        stat_row("Accuracy:", f"{d['accuracy']:.0f}%",
+                 LIME if d['accuracy'] >= 90 else YELLOW if d['accuracy'] >= 60 else RED)
+        stat_row("Time:", f"{d['time']:.1f}s", CYAN)
+
+        if d["perfect_bonus"] > 0:
+            stat_row("Perfect wave bonus:", f"+{d['perfect_bonus']}", GOLD)
+        if d["acc_bonus"] > 0:
+            stat_row("Accuracy bonus:", f"+{d['acc_bonus']}", GOLD)
+
+        # Coming up label
+        next_wave = d["wave"] + 1
+        is_boss = (next_wave % BOSS_WAVE_INTERVAL == 0)
+        next_col = RED if is_boss else WHITE
+        next_str = f"BOSS WAVE {next_wave}!" if is_boss else f"Next: Wave {next_wave}"
+        next_txt = self.font_sm.render(next_str, True, next_col)
+        self.screen.blit(next_txt, (cx - next_txt.get_width() // 2, panel_y + panel_h - 72))
+
+        # Skip hint (blinking)
+        if int(pygame.time.get_ticks() / 500) % 2:
+            skip_txt = self.font_xs.render("SPACE / ENTER to continue", True, DIM_WHITE)
+            self.screen.blit(skip_txt, (cx - skip_txt.get_width() // 2, panel_y + panel_h - 36))
 
     def _draw_gameover(self, offset):
         draw_fn = draw_alien_a if self.alien_frame == 0 else draw_alien_b
@@ -1668,7 +2113,7 @@ class Game:
                     self.screen.blit(arrow_up, (x + 15, 500))
                     self.screen.blit(arrow_dn, (x + 15, 620))
 
-            confirm = self.font_sm.render("Press ENTER to confirm", True, DIM_WHITE)
+            confirm = self.font_sm.render("Type letters or use Up/Down arrows, then ENTER", True, DIM_WHITE)
             self.screen.blit(confirm, (WIDTH // 2 - confirm.get_width() // 2, 670))
         else:
             restart = self.font_med.render("Press R to return to title", True, WHITE)
