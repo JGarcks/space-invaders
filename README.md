@@ -1,6 +1,6 @@
 # 👾 Space Invaders
 
-A neon-themed Space Invaders remake built entirely in Python & Pygame — no assets, no libraries beyond pygame, everything procedurally generated. Features a deep combo/frenzy system, four distinct boss types, classic pixel-art alien sprites, five visual sectors, cinematic screen effects, procedural chiptune music, and a Konami code easter egg.
+A neon-themed Space Invaders remake built entirely in Python & Pygame — no assets, no libraries beyond pygame, everything procedurally generated. Features a deep combo/frenzy system, four distinct boss types, classic pixel-art alien sprites, six visual sectors, unique enemy movement patterns per sector, cinematic screen effects, procedural chiptune music, and a Konami code easter egg.
 
 > *Built from scratch with zero coding experience using AI. Every line of code, every effect, every sound is generated at runtime.*
 
@@ -42,6 +42,21 @@ Pre-built executables are automatically built via GitHub Actions on every push.
 - **Dive-bombing aliens** — Galaga-style dive attacks from wave 2 onwards
 - **Destructible barriers** — 4 bunkers that erode block-by-block under fire
 - **UFO mystery ship** — flies across the top for bonus points (50–300)
+- **Pressure pulses** — every 20 seconds the formation surges forward and enemy fire rate doubles for 5 seconds, keeping mid-wave tension high
+
+### Enemy Movement Patterns
+Each visual sector has a unique formation behaviour, escalating in complexity as you progress:
+
+| Sector | Pattern | Description |
+|--------|---------|-------------|
+| I – Deep Space | Classic March | Standard left-right sweep with downward drops on each edge bounce |
+| II – Nebula Field | Sinusoidal Sweep | Formation glides in a smooth sine wave, drifting unpredictably |
+| III – Asteroid Belt | Accordion Pulse | Formation breathes in and out horizontally while advancing |
+| IV – Solar Flare | Predator Lock-On | Formation locks onto the player's X position and surges toward them |
+| V – Deep Anomaly | Serpent Chain | Aliens flow as a connected Lissajous ribbon |
+| VI – Event Horizon | Orbital Ring | Formation orbits a central anchor point in a sweeping ring |
+
+Each sector also has a distinct **entry animation** — from instant appearance in Sector I to diagonal slash entries and column cascades in later sectors.
 
 ### Boss Encounters
 - **4 unique boss types**, each with a cinematic title card on entry:
@@ -65,7 +80,7 @@ Pre-built executables are automatically built via GitHub Actions on every push.
 - **Wingman drone** — orbits the player and fires independently
 
 ### Visuals & Audio
-- **5 visual sectors** — the game world evolves every 10 waves: Deep Space → Nebula Field → Asteroid Belt → Solar Flare → Deep Anomaly. Each sector has a unique background colour, star tint, and an animated transition banner
+- **6 visual sectors** — the game world evolves every 10 waves: Deep Space → Nebula Field → Asteroid Belt → Solar Flare → Deep Anomaly → Event Horizon. Each sector has a unique background colour, star tint, and an animated transition banner
 - **Smooth sinusoidal screen shake** — cinematic camera wobble on impacts and explosions
 - **Procedural chiptune music** — 4 adaptive tiers that respond to frenzy level, all synthesised in real time (zero audio files)
 - **CRT scanline overlay + vignette** — pre-baked for zero per-frame cost
@@ -113,7 +128,8 @@ This repo uses **GitHub Actions** to automatically build executables for Windows
 |------|---------|
 | `si_game.py` | Main game loop, state machine, all update/draw logic |
 | `si_entities.py` | Dataclasses and classes for all game objects; pixel-art sprite renderer |
-| `si_constants.py` | All tuneable constants, colour palette, sector/boss data |
+| `si_movement.py` | All enemy movement patterns (ClassicMarch, SinusoidalSweep, AccordionPulse, RollingPincer, PredatorLockOn, SerpentChain, OrbitalRing) |
+| `si_constants.py` | All tuneable constants, colour palette, sector/boss/pattern data |
 | `si_audio.py` | Fully procedural sound synthesis — no audio files |
 | `si_persistence.py` | JSON save/load for high scores and achievements |
 
