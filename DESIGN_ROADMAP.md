@@ -1,12 +1,20 @@
 # Space Invaders — Design Roadmap
-*Last updated: March 2026 — CRT overlay added (Stage 1 of Next Up complete), Phase 2 (smartphone) identified as long-term goal*
+*Last updated: March 2026 — CRT overlay complete; full software-engineering refactor complete (modular architecture, typed dataclasses, enums, lazy SoundManager, unit tests)*
 
 ---
 
 ## How to resume this project in a new session
 1. Open Claude Cowork and select your SpaceInvaders folder
 2. Say: *"I'm working on my Space Invaders game. Please read DESIGN_ROADMAP.md from my SpaceInvaders folder to get up to speed, then we'll continue from the Next Up section."*
-3. Claude will read this file and space_invaders.py and be ready to go.
+3. Claude will read this file and be ready to go.
+
+**Important:** The game is now split into modules. The entry point is still `space_invaders.py` — run that to play. The modules are:
+- `si_constants.py` — all constants, colours, enums
+- `si_audio.py` — procedural sound synthesis + `SoundManager`
+- `si_entities.py` — dataclasses (`Alien`, `Bullet`, `EnemyBullet`) and all other entity classes
+- `si_persistence.py` — JSON highscore/achievement read-write
+- `si_game.py` — the full `Game` class
+- `tests/test_logic.py` — 26 unit tests (no pygame required; run with `pytest tests/`)
 
 ---
 
@@ -107,10 +115,7 @@ Alpha values: all clamped with min(255, ...) to prevent pygame crash
 
 ---
 
-## ⭐ NEXT UP — Three features agreed, ready to implement
-
-These were the focus of creative discussion and are the clear next session's work.
-Estimated total time: ~5–6 hours. Tackle in this order:
+## ⭐ NEXT UP — Two features remaining (one is done)
 
 ### ✅ 1. CRT Scanline Overlay — COMPLETE
 - Horizontal scanlines every 2px at 30% opacity (`alpha=77`)
