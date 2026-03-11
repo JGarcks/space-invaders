@@ -186,6 +186,7 @@ class Game:
         self.frenzy_tier         = 0
         self.frenzy_banner_timer = 0.0
         self.frenzy_banner_tier  = 0
+        self._music_tier: int    = 0
 
         self._low_life_timer  = 0.0
         self.wave_clear_flash = 0.0
@@ -424,7 +425,7 @@ class Game:
             if event.key == pygame.K_RETURN:
                 self._init_game()
                 self.state = GameState.PLAYING
-                self.sfx.music_channel.play(self.sfx.music_loop, loops=-1)
+                self.sfx.music_channel.play(self.sfx.music_for_tier(0), loops=-1)
             elif event.key == pygame.K_LEFT:
                 idx = (self.unlocked_ships.index(self.selected_ship)
                        if self.selected_ship in self.unlocked_ships else 0)
@@ -500,7 +501,7 @@ class Game:
                     self.wave  = max(1, int(self.wave * CONTINUE_WAVE_PENALTY))
                     self.state = GameState.PLAYING
                     self._spawn_wave()
-                    self.sfx.music_channel.play(self.sfx.music_loop, loops=-1)
+                    self.sfx.music_channel.play(self.sfx.music_for_tier(self.frenzy_tier), loops=-1)
                 elif event.key == pygame.K_r:
                     self.state = GameState.TITLE
 
@@ -555,6 +556,12 @@ class Game:
                 self._low_life_timer = 1.4
         else:
             self._low_life_timer = 0.0
+
+        # Adaptive music — swap track when frenzy tier changes
+        if self.frenzy_tier != self._music_tier:
+            self._music_tier = self.frenzy_tier
+            self.sfx.music_channel.stop()
+            self.sfx.music_channel.play(self.sfx.music_for_tier(self.frenzy_tier), loops=-1)
 
         keys = pygame.key.get_pressed()
 

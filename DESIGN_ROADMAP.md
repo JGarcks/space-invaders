@@ -124,32 +124,21 @@ Alpha values: all clamped with min(255, ...) to prevent pygame crash
 - Both surfaces pre-baked in `__init__` — zero per-frame CPU cost
 - Title screen controls hint updated to show `C = CRT`
 
-### 2. Galaga Dive-Bombing (2–3 hours)
-Aliens periodically break formation and swoop at the player:
-- 1–2 aliens per wave peel off and follow a swooping arc (sin/cos curve)
-- They target the player's X position during the dive
-- After sweeping through, they either loop off-screen (removed) or return to grid
-- Grid continues moving normally while divers are away
-- Collision detection works normally during dive
-- Cap on simultaneous divers (max 2–3 at once) to keep it fair
-- Divers move faster than the grid — they're a genuine threat
-- Tuning is key: should feel exciting, not cheap
-- Reference: Galaga (1981) — the defining mechanic of that era
+### ✅ 2. Galaga Dive-Bombing — COMPLETE
+- `DiveBomber` class fully implemented: swooping arc, player-tracking, return-to-grid
+- One diver at a time, breaks from grid at random interval (14–28 s)
+- Targets player X during dive phase, returns to start position after
+- Full collision detection during dive, SFX on breakout (`sfx.play("dive")`)
+- Active from wave 2 onwards
 
-### 3. Procedural Chiptune Music (3–4 hours) — SAVE FOR LAST
-Background music generated entirely with numpy — no audio files:
-- Square wave melody + triangle bass + noise hi-hat rhythm
-- Loops seamlessly during gameplay
-- Evolves with frenzy tier:
-  - Tier 0: calm, steady tempo (~120 BPM)
-  - Tier 1: slightly faster, higher pitch melody
-  - Tier 2: faster again, more aggressive tone
-  - MAX FRENZY/MANIAC: distorted, frenetic, chaotic
-- Transitions between tiers smoothly (crossfade or next-loop swap)
-- Respects the existing mute toggle (M key)
-- Title screen gets its own simpler loop
-- This is the single highest-impact addition — transforms the entire feel of the game
-- Most time is tuning, not coding
+### ✅ 3. Adaptive Procedural Chiptune Music — COMPLETE
+Four fully-distinct looping tracks, all synthesised at runtime:
+- **Tier 0 (130 BPM)** — calm bass groove + noise hi-hat, plays from wave start
+- **Tier 1 (145 BPM)** — faster tempo, adds square-wave A-minor pentatonic melody
+- **Tier 2 (162 BPM)** — busier half-beat bass, 16-note melody, hi-hat every quarter-beat
+- **Tier 3 / MANIAC (180 BPM)** — dense chromatic lead, hi-hat every 8th-beat, maximum chaos
+- Music swaps instantly when frenzy tier changes (up or down)
+- Correct tier resumes after wave summaries and continues
 
 ---
 
