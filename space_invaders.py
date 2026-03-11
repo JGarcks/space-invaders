@@ -918,10 +918,21 @@ class Game:
         self.font_sm  = pygame.font.SysFont("consolas", 26)
         self.font_xs  = pygame.font.SysFont("consolas", 20)
 
-        # Scanline overlay (cached for performance)
+        # CRT overlay (cached for performance; toggle with C key)
+        self.crt_enabled = True
+        # Scanlines — every 2px at ~30% opacity
         self.scanline_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        for sy in range(0, HEIGHT, 3):
-            pygame.draw.line(self.scanline_surf, (0, 0, 0, 10), (0, sy), (WIDTH, sy))
+        for sy in range(0, HEIGHT, 2):
+            pygame.draw.line(self.scanline_surf, (0, 0, 0, 77), (0, sy), (WIDTH, sy))
+        # Vignette — dark edges fading to transparent centre
+        self.vignette_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        vd = 220  # depth in pixels from each edge
+        for i in range(vd):
+            alpha = int(160 * ((1 - i / vd) ** 2))
+            pygame.draw.line(self.vignette_surf, (0, 0, 0, alpha), (0, i), (WIDTH, i))
+            pygame.draw.line(self.vignette_surf, (0, 0, 0, alpha), (0, HEIGHT-1-i), (WIDTH, HEIGHT-1-i))
+            pygame.draw.line(self.vignette_surf, (0, 0, 0, alpha), (i, 0), (i, HEIGHT))
+            pygame.draw.line(self.vignette_surf, (0, 0, 0, alpha), (WIDTH-1-i, 0), (WIDTH-1-i, HEIGHT))
 
         self.stars = []
         for layer in range(3):
@@ -1288,6 +1299,11 @@ class Game:
 
     # ── Input ─────────────────────────────────────────────────────────────────
     def _handle_keydown(self, event):
+        # CRT toggle — works in all states except GAME_OVER (C = continue there)
+        if event.key == pygame.K_c and self.state != "GAME_OVER":
+            self.crt_enabled = not self.crt_enabled
+            return
+
         if self.state == "TITLE":
             if event.key == pygame.K_RETURN:
                 self._init_game()
@@ -2187,8 +2203,10 @@ class Game:
             flash.fill((255, 200, 50, alpha))
             self.screen.blit(flash, (0, 0))
 
-        # Scanline overlay
-        self.screen.blit(self.scanline_surf, (0, 0))
+        # CRT overlay (scanlines + vignette)
+        if self.crt_enabled:
+            self.screen.blit(self.scanline_surf, (0, 0))
+            self.screen.blit(self.vignette_surf, (0, 0))
 
         pygame.display.flip()
 
@@ -2260,7 +2278,7 @@ class Game:
             self.screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 596))
 
         ctrl = self.font_xs.render(
-            "A/D or Arrows = Move  |  Space = Shoot  |  P = Pause  |  ESC = Quit",
+            "A/D or Arrows = Move  |  Space = Shoot  |  P = Pause  |  C = CRT  |  ESC = Quit",
             True, DIM_WHITE
         )
         self.screen.blit(ctrl, (WIDTH // 2 - ctrl.get_width() // 2, HEIGHT - 30))
