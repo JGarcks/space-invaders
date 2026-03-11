@@ -1,6 +1,6 @@
-# Space Invaders
+# Neon Invaders
 
-A neon-styled Space Invaders remake built in Python and Pygame. All assets, sprites, and audio are generated procedurally at runtime — no external files required.
+A feature-rich Space Invaders remake built in Python and Pygame. All sprites, audio, and visual effects are generated procedurally at runtime — zero external assets required.
 
 ---
 
@@ -97,7 +97,7 @@ Bosses cycle every 5 waves and scale in HP and speed.
 
 ```bash
 pip install pygame
-python si_game.py
+python space_invaders.py
 ```
 
 Requires Python 3.9+.
@@ -108,7 +108,7 @@ Requires Python 3.9+.
 
 ```bash
 pip install pyinstaller pygame
-pyinstaller --onefile --windowed --name SpaceInvaders si_game.py
+pyinstaller --onefile --windowed --name SpaceInvaders space_invaders.py
 ```
 
 Output: `dist/SpaceInvaders.exe` (Windows) or `dist/SpaceInvaders` (macOS).
@@ -119,6 +119,7 @@ Output: `dist/SpaceInvaders.exe` (Windows) or `dist/SpaceInvaders` (macOS).
 
 | File | Purpose |
 |------|---------|
+| `space_invaders.py` | Entry point — run this to start the game |
 | `si_game.py` | Game loop, state machine, update and draw logic |
 | `si_entities.py` | Game object dataclasses and pixel-art sprite renderer |
 | `si_movement.py` | Enemy movement patterns (ClassicMarch, SinusoidalSweep, AccordionPulse, RollingPincer, PredatorLockOn, SerpentChain, OrbitalRing) |
