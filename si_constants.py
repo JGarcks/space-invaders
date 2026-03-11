@@ -170,3 +170,22 @@ DIFFICULTY_SETTINGS: dict[str, dict[str, float]] = {
     "Normal": {"speed": 1.00, "fire_rate": 1.00, "powerup": 0.06, "bullet_speed": 1.00},
     "Hard":   {"speed": 1.40, "fire_rate": 1.50, "powerup": 0.04, "bullet_speed": 1.30},
 }
+
+# ── Wave codenames ─────────────────────────────────────────────────────────────
+CODENAME_ADJECTIVES: list[str] = [
+    "CRIMSON", "IRON", "DARK", "SILENT", "PHANTOM", "GHOST", "SHADOW",
+    "NEON", "OMEGA", "ALPHA", "DELTA", "GOLDEN", "SILVER", "CHROME",
+    "INFERNO", "VOID", "NEBULA", "COSMIC", "STELLAR", "BRUTAL",
+]
+CODENAME_NOUNS: list[str] = [
+    "TIDE", "STORM", "FURY", "DAWN", "SQUADRON", "FLEET", "ARMADA",
+    "SENTINEL", "THUNDER", "ECLIPSE", "VORTEX", "VECTOR", "PROTOCOL",
+    "NEXUS", "HORIZON", "IMPACT", "BREACH", "SURGE", "ONSLAUGHT", "DIRECTIVE",
+]
+
+# ── Speed bonus ────────────────────────────────────────────────────────────────
+SPEED_BONUS_THRESHOLD = 45.0    # seconds — clear faster than this = bonus
+SPEED_BONUS_POINTS    = 500
+
+# ── Flawless bonus ─────────────────────────────────────────────────────────────
+FLAWLESS_BONUS_POINTS = 2000

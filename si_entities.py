@@ -476,6 +476,62 @@ class Boss:
         pygame.draw.rect(surface, WHITE,         (bx, by_, bar_w, bar_h), 1,           border_radius=4)
 
 
+# ── Ship Fragment (death effect) ──────────────────────────────────────────────
+
+class ShipFragment:
+    """A spinning triangular shard of the player's ship, spawned on death."""
+
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        vx: float,
+        vy: float,
+        colour: tuple[int, int, int],
+        angle: float,
+        rot_speed: float,
+        size: float = 1.0,
+    ) -> None:
+        self.x, self.y = x, y
+        self.vx, self.vy = vx, vy
+        self.colour = colour
+        self.angle = angle
+        self.rot_speed = rot_speed
+        self.size = size
+        self.life = 1.0
+        self.max_life = 1.0
+
+    def update(self, dt: float) -> bool:
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.vy += 240 * dt   # gentle gravity
+        self.vx *= 0.98
+        self.angle += self.rot_speed * dt
+        self.life -= dt
+        return self.life > 0
+
+    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+        alpha = max(0.0, self.life / self.max_life)
+        ox, oy = offset
+        cx, cy = int(self.x) + ox, int(self.y) + oy
+        s = 14 * self.size
+        # Equilateral-ish triangle in local space
+        local_pts = [
+            (0.0,       -s),
+            ( s * 0.8,   s * 0.6),
+            (-s * 0.8,   s * 0.6),
+        ]
+        ca, sa = math.cos(self.angle), math.sin(self.angle)
+        pts = []
+        for px, py in local_pts:
+            rx = px * ca - py * sa
+            ry = px * sa + py * ca
+            pts.append((cx + int(rx), cy + int(ry)))
+        col = tuple(max(0, int(c * alpha)) for c in self.colour)
+        if alpha > 0.05 and len(pts) == 3:
+            pygame.draw.polygon(surface, col, pts)   # type: ignore[arg-type]
+
+
 # ── Draw helpers ──────────────────────────────────────────────────────────────
 
 def draw_ship(

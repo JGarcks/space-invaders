@@ -35,12 +35,15 @@ from si_constants import (
     DIFFICULTIES, DIFFICULTY_SETTINGS,
     POWERUP_TYPES, POWERUP_COLOURS, POWERUP_LABELS,
     GameState, PowerUpKind, UpgradeId,
+    CODENAME_ADJECTIVES, CODENAME_NOUNS,
+    SPEED_BONUS_THRESHOLD, SPEED_BONUS_POINTS,
+    FLAWLESS_BONUS_POINTS,
 )
 from si_audio import SoundManager
 from si_entities import (
     Alien, Bullet, EnemyBullet,
     Particle, Star, PowerUp, AchievementBanner, ComboPopup,
-    UFO, Barrier, DiveBomber, Boss,
+    UFO, Barrier, DiveBomber, Boss, ShipFragment,
     draw_ship, draw_alien_a, draw_alien_b,
 )
 from si_persistence import (
@@ -96,6 +99,16 @@ class Game:
         self._unlock_ships()
 
         self.title_pulse = 0.0
+
+        # ── Konami code ───────────────────────────────────────────────────────
+        self._konami_seq = [
+            pygame.K_UP, pygame.K_UP, pygame.K_DOWN, pygame.K_DOWN,
+            pygame.K_LEFT, pygame.K_RIGHT, pygame.K_LEFT, pygame.K_RIGHT,
+            pygame.K_b, pygame.K_a,
+        ]
+        self.konami_buffer: list[int] = []
+        self.konami_pending: bool    = False   # code entered, awaits next game
+        self.konami_active:  bool    = False   # cheat mode ON this run
 
         self.entering_name = False
         self.name_chars = ["A", "A", "A"]
@@ -176,6 +189,11 @@ class Game:
         self.wave_summary_data: dict = {}
         self.wave_kills = 0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
+        self.wave_flawless        = True    # True until any hit lands (even vs shield)
+        self.last_alien_announced = False   # True once "LAST ONE!" has been shown
+        self.wave_codename        = ""
+        self.ship_fragments: list[ShipFragment] = []
+        self.konami_active = False
 
         self.active_upgrades: dict[str, int] = {}
         self.upgrade_choices: list[dict] = []
@@ -254,6 +272,8 @@ class Game:
         self.enemy_shoot_timer    = self.enemy_shoot_interval
         self.enemy_bullets        = []
         self.wave_damage_taken    = False
+        self.wave_flawless        = True
+        self.last_alien_announced = False
         self.powerups_collected_wave = 0
         self.shots_fired = 0
         self.shots_hit   = 0
@@ -375,6 +395,41 @@ class Game:
                 pierce_remaining=pierce_remaining,
             ))
 
+    def _apply_konami_cheats(self) -> None:
+        """Apply Konami Code cheat mode: 30 lives + all upgrades."""
+        self.lives = 30
+        self.konami_active = True
+        for upg in UPGRADE_POOL:
+            if upg["id"] != "extralife":
+                self.active_upgrades[upg["id"]] = 999
+        self.banners.append(AchievementBanner(
+            "CHEATER! 30 LIVES + ALL UPGRADES", self.font_sm))
+        self.sfx.play("achieve")
+
+    def _spawn_ship_fragments(self) -> None:
+        """Shatter the player ship into spinning triangular fragments."""
+        cx, cy = self.player_x, self.player_y
+        col    = self._get_ship_colour()
+        # Five shards matching the rough topology of the ship polygon
+        shard_data = [
+            ( 0.0, -1.0,  1.0),   # nose — flies upward
+            (-1.0,  0.3,  0.85),  # left wing
+            ( 1.0,  0.3,  0.85),  # right wing
+            (-0.35, 0.65, 0.65),  # left body piece
+            ( 0.35, 0.65, 0.65),  # right body piece
+        ]
+        for dx, dy, sz in shard_data:
+            spd = random.uniform(160, 320)
+            self.ship_fragments.append(ShipFragment(
+                cx, cy,
+                dx * spd + random.uniform(-40, 40),
+                dy * spd + random.uniform(-40, 40),
+                col,
+                angle=random.uniform(0, math.tau),
+                rot_speed=random.uniform(-8, 8),
+                size=sz,
+            ))
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -417,6 +472,16 @@ class Game:
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def _handle_keydown(self, event: pygame.event.Event) -> None:
+        # ── Konami code detector (any state) ──────────────────────────────────
+        self.konami_buffer.append(event.key)
+        if len(self.konami_buffer) > len(self._konami_seq):
+            self.konami_buffer.pop(0)
+        if self.konami_buffer == self._konami_seq:
+            self.konami_pending = True
+            self.sfx.play("achieve")
+            self.banners.append(
+                AchievementBanner("KONAMI CODE! Cheat mode ready...", self.font_sm))
+
         if event.key == pygame.K_c and self.state != GameState.GAME_OVER:
             self.crt_enabled = not self.crt_enabled
             return
@@ -424,6 +489,9 @@ class Game:
         if self.state == GameState.TITLE:
             if event.key == pygame.K_RETURN:
                 self._init_game()
+                if self.konami_pending:
+                    self._apply_konami_cheats()
+                    self.konami_pending = False
                 self.state = GameState.PLAYING
                 self.sfx.music_channel.play(self.sfx.music_for_tier(0), loops=-1)
             elif event.key == pygame.K_LEFT:
@@ -708,9 +776,15 @@ class Game:
             self.alien_anim_timer -= anim_threshold
             self.alien_frame = 1 - self.alien_frame
 
+        # ── Ship fragment update ──────────────────────────────────────────
+        self.ship_fragments = [f for f in self.ship_fragments if f.update(dt)]
+
         # ── Move aliens ───────────────────────────────────────────────────
+        # Last alien gets a 2× speed boost for tension
+        last_alien_mode = (len(self.aliens) == 1
+                           and not self.boss and not self.dive_bombers)
         if self.aliens:
-            adx = self.alien_dir * self.alien_speed * dt
+            adx = self.alien_dir * self.alien_speed * (2.0 if last_alien_mode else 1.0) * dt
             for a in self.aliens:
                 a.x += adx
                 if a.hit_flash > 0:
@@ -932,6 +1006,20 @@ class Game:
             self._check_life_milestones()
             self.wave_kills += 1
 
+            # ── Multi-kill callout ────────────────────────────────────────────
+            if self.combo_count == 2:
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 120, 0, self.font_lv,
+                    text="DOUBLE  KILL!"))
+            elif self.combo_count == 3:
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 120, 0, self.font_lv,
+                    text="TRIPLE  KILL!"))
+            elif self.combo_count == 4:
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 120, 0, self.font_lv,
+                    text="MASSACRE!"))
+
             if self.wave <= 10:
                 death_count  = 6
                 death_size_max = 4
@@ -963,6 +1051,14 @@ class Game:
             self._frenzy_kill()
             if self.combo_multiplier >= 5:
                 self._try_achievement("Combo Star")
+
+            # ── Last alien detection ──────────────────────────────────────────
+            if (len(self.aliens) == 1 and not self.last_alien_announced
+                    and not self.boss and not self.dive_bombers):
+                self.last_alien_announced = True
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 60, 0, self.font_lv,
+                    text="LAST  ONE!"))
 
         for fx, fy in frag_to_spawn:
             for angle_deg in (-22, 22):
@@ -1159,11 +1255,31 @@ class Game:
             elapsed  = pygame.time.get_ticks() / 1000.0 - self.wave_start_time
             accuracy = (self.shots_hit / self.shots_fired * 100
                         if self.shots_fired > 0 else 0.0)
-            perfect_bonus = 500 if not self.wave_damage_taken else 0
-            acc_bonus     = int(accuracy * 5) if accuracy >= 90.0 else 0
-            if perfect_bonus + acc_bonus > 0:
-                self.score += perfect_bonus + acc_bonus
+            perfect_bonus  = 500 if not self.wave_damage_taken else 0
+            acc_bonus      = int(accuracy * 5) if accuracy >= 90.0 else 0
+            speed_bonus    = SPEED_BONUS_POINTS if elapsed < SPEED_BONUS_THRESHOLD else 0
+            flawless_bonus = FLAWLESS_BONUS_POINTS if self.wave_flawless else 0
+
+            # Wave codename (deterministic per wave number)
+            adj  = CODENAME_ADJECTIVES[(cleared_wave * 7 + 3) % len(CODENAME_ADJECTIVES)]
+            noun = CODENAME_NOUNS[(cleared_wave * 11 + 5) % len(CODENAME_NOUNS)]
+            self.wave_codename = f"OPERATION  {adj}  {noun}"
+
+            total_bonus = perfect_bonus + acc_bonus + speed_bonus + flawless_bonus
+            if total_bonus > 0:
+                self.score += total_bonus
                 self._check_life_milestones()
+
+            if flawless_bonus > 0:
+                self.banners.append(
+                    AchievementBanner("FLAWLESS WAVE!", self.font_sm))
+                self.sfx.play("achieve")
+
+            if speed_bonus > 0:
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 + 40, 0, self.font_med,
+                    text=f"SPEED  CLEAR!  +{speed_bonus}"))
+
             self.wave_summary_data = {
                 "wave":           cleared_wave,
                 "kills":          self.wave_kills,
@@ -1171,6 +1287,9 @@ class Game:
                 "time":           elapsed,
                 "perfect_bonus":  perfect_bonus,
                 "acc_bonus":      acc_bonus,
+                "speed_bonus":    speed_bonus,
+                "flawless_bonus": flawless_bonus,
+                "codename":       self.wave_codename,
             }
             self.sfx.music_channel.pause()
 
@@ -1188,6 +1307,7 @@ class Game:
         if self.invincible_timer > 0:
             return
         self.invincible_timer = 0.01
+        self.wave_flawless = False   # any hit — even absorbed by shield — breaks flawless
 
         if self.has_shield:
             self.has_shield = False
@@ -1199,6 +1319,7 @@ class Game:
 
         self.lives -= 1
         self.wave_damage_taken = True
+        self._spawn_ship_fragments()
         self._spawn_explosion(self.player_x, self.player_y,
                               self._get_ship_colour(), count=20)
         self._add_shake(6, 0.2)
@@ -1365,6 +1486,12 @@ class Game:
             True, DIM_WHITE)
         self.screen.blit(ctrl, (WIDTH // 2 - ctrl.get_width() // 2, HEIGHT - 30))
 
+        if self.konami_pending:
+            kn = self.font_sm.render("★ CHEAT MODE ARMED — Press ENTER ★", True, GOLD)
+            t_kn = pygame.time.get_ticks() / 1000.0
+            kn.set_alpha(int(180 + 75 * abs(math.sin(t_kn * 3))))
+            self.screen.blit(kn, (WIDTH // 2 - kn.get_width() // 2, HEIGHT - 62))
+
     def _draw_playing(self, offset: list[int]) -> None:
         ox, oy = offset
 
@@ -1479,6 +1606,19 @@ class Game:
 
         for cp in self.combo_popups:
             cp.draw(self.screen, offset)
+
+        # ── Ship fragments ────────────────────────────────────────────────
+        for frag in self.ship_fragments:
+            frag.draw(self.screen, offset)
+
+        # ── Last Alien pulsing label ──────────────────────────────────────
+        if (len(self.aliens) == 1 and not self.boss
+                and not self.dive_bombers and self.boss_cinematic_timer <= 0):
+            t_la = pygame.time.get_ticks() / 1000.0
+            pulse_a = int(180 + 75 * abs(math.sin(t_la * 5)))
+            last_txt = self.font_lv.render("LAST  ONE!", True, RED)
+            last_txt.set_alpha(pulse_a)
+            self.screen.blit(last_txt, (WIDTH // 2 - last_txt.get_width() // 2, 82))
 
         if self.wave_clear_flash > 0:
             alpha = int(180 * self.wave_clear_flash)
@@ -1619,8 +1759,19 @@ class Game:
 
         diff_colour = {"Easy": LIME, "Normal": CYAN, "Hard": RED}.get(
             self.difficulty, WHITE)
-        diff_badge = self.font_xs.render(self.difficulty.upper(), True, diff_colour)
-        self.screen.blit(diff_badge, (WIDTH - diff_badge.get_width() - 16, 52))
+        diff_str  = self.difficulty.upper()
+        if self.konami_active:
+            diff_str = "CHEATER!"
+            diff_colour = GOLD
+        diff_badge = self.font_xs.render(diff_str, True, diff_colour)
+        db_w = diff_badge.get_width() + 10
+        db_x = WIDTH - db_w - 10
+        db_y = 50
+        db_bg = pygame.Surface((db_w, 18), pygame.SRCALPHA)
+        pygame.draw.rect(db_bg, (*diff_colour[:3], 40),  (0, 0, db_w, 18), border_radius=4)
+        pygame.draw.rect(db_bg, (*diff_colour[:3], 160), (0, 0, db_w, 18), 1, border_radius=4)
+        self.screen.blit(db_bg,    (db_x, db_y))
+        self.screen.blit(diff_badge, (db_x + 5, db_y + 1))
 
         if self.aliens:
             alien_count_txt = self.font_xs.render(
@@ -1809,10 +1960,14 @@ class Game:
         cx = WIDTH // 2
 
         title_txt = self.font_big.render(f"WAVE  {d['wave']}  CLEAR!", True, GOLD)
-        self.screen.blit(title_txt, (cx - title_txt.get_width() // 2, panel_y + 24))
+        self.screen.blit(title_txt, (cx - title_txt.get_width() // 2, panel_y + 18))
 
-        row_y   = panel_y + 120
-        row_gap = 52
+        if d.get("codename"):
+            cn_txt = self.font_xs.render(d["codename"], True, DIM_WHITE)
+            self.screen.blit(cn_txt, (cx - cn_txt.get_width() // 2, panel_y + 88))
+
+        row_y   = panel_y + 108
+        row_gap = 46
 
         def stat_row(label: str, value: str,
                      colour: tuple[int, int, int] = WHITE) -> None:
@@ -1828,10 +1983,14 @@ class Game:
                  LIME if d["accuracy"] >= 90 else YELLOW if d["accuracy"] >= 60 else RED)
         stat_row("Time:", f"{d['time']:.1f}s", CYAN)
 
+        if d.get("flawless_bonus", 0) > 0:
+            stat_row("FLAWLESS bonus:", f"+{d['flawless_bonus']}", GOLD)
         if d["perfect_bonus"] > 0:
             stat_row("Perfect wave bonus:", f"+{d['perfect_bonus']}", GOLD)
         if d["acc_bonus"] > 0:
             stat_row("Accuracy bonus:", f"+{d['acc_bonus']}", GOLD)
+        if d.get("speed_bonus", 0) > 0:
+            stat_row("Speed clear bonus:", f"+{d['speed_bonus']}", CYAN)
 
         next_wave = d["wave"] + 1
         is_boss   = (next_wave % BOSS_WAVE_INTERVAL == 0)
