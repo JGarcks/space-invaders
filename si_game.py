@@ -59,7 +59,7 @@ from si_constants import HIGHSCORE_FILE
 
 class Game:
     def __init__(self) -> None:
-        flags = pygame.FULLSCREEN
+        flags = pygame.FULLSCREEN | pygame.DOUBLEBUF
         try:
             flags |= pygame.SCALED
         except Exception:
@@ -146,7 +146,7 @@ class Game:
     def _init_game(self) -> None:
         self.player_x: float = WIDTH // 2
         self.player_y: float = HEIGHT - 80
-        self.lives = 3
+        self.lives = 4
         self.score = 0
         self.wave = 1
         self.alien_dir = 1
@@ -296,7 +296,7 @@ class Game:
         else:
             y_offset = min((self.wave - 1) * 8, 100)
             rows     = min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
-            alien_hp = min(3, 1 + (self.wave - 1) // 10)
+            alien_hp = min(3, 1 + (self.wave - 1) // 20)
             for row in range(rows):
                 # Sprite tier: top rows=squid(0), mid=crab(1), bottom=octopus(2)
                 sprite_tier = min(2, row // 2)
@@ -309,13 +309,13 @@ class Game:
                     )
 
         self.alien_dir = 1
-        raw_speed = ALIEN_START_SPEED * (1 + 0.015 * (self.wave - 1)) * diff["speed"]
+        raw_speed = ALIEN_START_SPEED * (1 + 0.010 * (self.wave - 1)) * diff["speed"]
         self.alien_speed = min(raw_speed, 340)
         self.enemy_shoot_interval = max(
-            0.4, (ENEMY_SHOOT_INTERVAL - 0.15 * (self.wave - 1)) / diff["fire_rate"]
+            0.55, (ENEMY_SHOOT_INTERVAL - 0.09 * (self.wave - 1)) / diff["fire_rate"]
         )
         self.enemy_bullet_speed = min(
-            650, (ENEMY_BULLET_SPEED + 18 * (self.wave - 1)) * diff["bullet_speed"]
+            450, (ENEMY_BULLET_SPEED + 10 * (self.wave - 1)) * diff["bullet_speed"]
         )
         self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, 0.22)
         self.current_alien_drop   = min(40, ALIEN_DROP + self.wave // 3)
@@ -485,7 +485,7 @@ class Game:
     def run(self) -> None:
         running = True
         while running:
-            dt = self.clock.tick(FPS) / 1000.0
+            dt = self.clock.tick_busy_loop(FPS) / 1000.0
             dt = min(dt, 0.05)
 
             for event in pygame.event.get():
@@ -1463,8 +1463,13 @@ class Game:
 
         offset = [0, 0]
         if self.shake_timer > 0:
-            offset[0] = random.randint(-self.shake_intensity, self.shake_intensity)
-            offset[1] = random.randint(-self.shake_intensity, self.shake_intensity)
+            # Smooth sinusoidal shake: two offset sine waves at different
+            # frequencies give a convincing 2-D camera wobble without the
+            # per-frame random jumps that cause visual noise.
+            t   = pygame.time.get_ticks() / 1000.0
+            amp = min(self.shake_intensity, 12) * min(1.0, self.shake_timer * 6)
+            offset[0] = int(math.sin(t * 97.3) * amp)
+            offset[1] = int(math.sin(t * 73.1) * amp)
 
         for star in self.stars:
             star.draw(self.screen, offset, tint=self.sector_star_tint)
