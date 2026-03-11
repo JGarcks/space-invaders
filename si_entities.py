@@ -21,6 +21,7 @@ from si_constants import (
     BARRIER_BLOCK_W, BARRIER_BLOCK_H,
     DIVE_SPEED,
     BOSS_WAVE_INTERVAL,
+    DIM_WHITE,
 )
 
 
@@ -33,6 +34,7 @@ class Alien:
     colour: tuple[int, int, int]
     hp: int
     hit_flash: float = 0.0
+    sprite_tier: int = 0   # 0=squid (top rows), 1=crab (mid), 2=octopus (bottom)
 
 
 # ── Player bullet ─────────────────────────────────────────────────────────────
@@ -123,9 +125,15 @@ class Star:
             self.y = 0
             self.x = random.randint(0, WIDTH)
 
-    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+    def draw(
+        self,
+        surface: pygame.Surface,
+        offset: list[int],
+        tint: tuple[int, int, int] = (255, 255, 255),
+    ) -> None:
+        col = tuple(min(255, int(c * t / 255)) for c, t in zip(self.colour, tint))
         pygame.draw.circle(
-            surface, self.colour,
+            surface, col,  # type: ignore[arg-type]
             (int(self.x) + offset[0], int(self.y) + offset[1]),
             self.size,
         )
@@ -336,9 +344,10 @@ class Barrier:
 
 class DiveBomber:
     def __init__(self, alien: Alien) -> None:
-        self.x       = alien.x
-        self.y       = alien.y
-        self.colour  = alien.colour
+        self.x           = alien.x
+        self.y           = alien.y
+        self.colour      = alien.colour
+        self.sprite_tier = alien.sprite_tier
         self.start_x = alien.x
         self.start_y = alien.y
         self.phase   = "dive"   # "dive" → "return" → alive = False
@@ -374,46 +383,113 @@ class DiveBomber:
     def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
         ox, oy = offset
         draw_fn = draw_alien_a if self.anim_frame == 0 else draw_alien_b
-        draw_fn(surface, int(self.x) + ox, int(self.y) + oy, self.colour, 1.25)
+        draw_fn(surface, int(self.x) + ox, int(self.y) + oy, self.colour, 1.25,
+                tier=self.sprite_tier)
         trail = pygame.Surface((50, 60), pygame.SRCALPHA)
         pygame.draw.ellipse(trail, (*self.colour, 35), (0, 0, 50, 60))
         surface.blit(trail, (int(self.x) + ox - 25, int(self.y) + oy - 30))
 
 
-# ── Boss ──────────────────────────────────────────────────────────────────────
+# ── Boss base + variants ───────────────────────────────────────────────────────
 
-class Boss:
-    def __init__(self, wave: int) -> None:
-        self.x       = float(WIDTH // 2)
-        self.y       = 195.0
-        self.base_y  = 195.0
+class _BossBase:
+    """
+    Shared scaffolding for every boss variant.
+
+    Subclasses MUST set self.max_hp before calling super().__init__() if they
+    need a custom value, or rely on the default scaling formula.
+    """
+
+    x:         float
+    y:         float
+    alive:     bool
+    hp:        int
+    max_hp:    int
+    hit_flash: float
+    wave_timer: float
+    anim_timer: float
+    anim_frame: int
+    shoot_timer: float
+    vx:        float
+    base_y:    float
+
+    def _common_init(self, wave: int, hp_extra: int = 0) -> None:
+        self.x          = float(WIDTH // 2)
+        self.y          = 195.0
+        self.base_y     = 195.0
         self.wave_timer = 0.0
-        boss_tier    = max(1, wave // BOSS_WAVE_INTERVAL)
-        self.max_hp  = 12 + boss_tier * 8
-        self.hp      = self.max_hp
-        self.alive   = True
-        self.vx      = float(min(180 + boss_tier * 25, 360))
+        self.anim_timer = 0.0
+        self.anim_frame = 0
+        self.hit_flash  = 0.0
+        self.alive      = True
+        boss_tier       = max(1, wave // BOSS_WAVE_INTERVAL)
+        self.max_hp     = 12 + boss_tier * 8 + hp_extra
+        self.hp         = self.max_hp
+        self.vx         = float(min(180 + boss_tier * 25, 360))
         self.shoot_timer = 1.8
-        self.anim_timer  = 0.0
-        self.anim_frame  = 0
-        self.hit_flash   = 0.0
 
     def is_phase2(self) -> bool:
         return self.hp <= self.max_hp // 2
 
-    def update(self, dt: float) -> None:
+    def is_hittable(self, bx: float = 0.0, by: float = 0.0) -> bool:
+        """Override in subclasses that have conditional invulnerability."""
+        return True
+
+    def _tick_common(self, dt: float) -> None:
         self.wave_timer += dt
         self.anim_timer += dt
         if self.anim_timer >= 0.20:
             self.anim_timer = 0.0
             self.anim_frame = 1 - self.anim_frame
-        self.x += self.vx * dt
-        self.y = self.base_y + 40.0 * math.sin(self.wave_timer * 1.6)
-        if self.x > WIDTH - 140 or self.x < 140:
-            self.vx *= -1
         if self.hit_flash > 0:
             self.hit_flash -= dt
         self.shoot_timer -= dt
+
+    def _move_horizontal(self, dt: float, margin: float = 140.0) -> None:
+        self.x += self.vx * dt
+        self.y  = self.base_y + 40.0 * math.sin(self.wave_timer * 1.6)
+        if self.x > WIDTH - margin or self.x < margin:
+            self.vx *= -1
+
+    def take_hit(self) -> bool:
+        """Returns True if this hit killed the boss."""
+        self.hp -= 1
+        self.hit_flash = 0.14
+        if self.hp <= 0:
+            self.alive = False
+            return True
+        return False
+
+    def _draw_hp_bar(
+        self,
+        surface: pygame.Surface,
+        cx: int,
+        cy: int,
+        bar_w: int = 220,
+        bar_h: int = 12,
+        bar_y_offset: int = -92,
+    ) -> None:
+        hp_frac = self.hp / self.max_hp
+        bar_col = LIME if hp_frac > 0.5 else YELLOW if hp_frac > 0.25 else RED
+        bx      = cx - bar_w // 2
+        by_     = cy + bar_y_offset
+        pygame.draw.rect(surface, (25, 25, 25), (bx, by_, bar_w, bar_h),              border_radius=4)
+        pygame.draw.rect(surface, bar_col,      (bx, by_, int(bar_w * hp_frac), bar_h), border_radius=4)
+        pygame.draw.rect(surface, WHITE,         (bx, by_, bar_w, bar_h), 1,           border_radius=4)
+
+
+class Mothership(_BossBase):
+    """
+    Classic flying saucer — the default boss.  Swoops horizontally and
+    accelerates into phase 2 with spokes and a faster fire rate.
+    """
+
+    def __init__(self, wave: int) -> None:
+        self._common_init(wave)
+
+    def update(self, dt: float) -> None:
+        self._tick_common(dt)
+        self._move_horizontal(dt)
 
     def should_shoot(self) -> bool:
         interval = 0.42 if self.is_phase2() else 0.72
@@ -422,18 +498,9 @@ class Boss:
             return True
         return False
 
-    def take_hit(self) -> bool:
-        """Returns True if the boss was killed."""
-        self.hp -= 1
-        self.hit_flash = 0.14
-        if self.hp <= 0:
-            self.alive = False
-            return True
-        return False
-
     def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
-        ox, oy = offset
-        cx, cy = int(self.x) + ox, int(self.y) + oy
+        ox, oy   = offset
+        cx, cy   = int(self.x) + ox, int(self.y) + oy
         flashing = self.hit_flash > 0
         phase2   = self.is_phase2()
 
@@ -450,7 +517,7 @@ class Boss:
                 a  = math.radians(spoke * 45 + self.wave_timer * 55)
                 sx = cx + int(118 * math.cos(a))
                 sy = cy + int(30  * math.sin(a))
-                pygame.draw.line(surface, (*RED, 120), (cx, cy), (sx, sy), 1)
+                pygame.draw.line(surface, (*RED, 120), (cx, cy), (sx, sy), 1)  # type: ignore[arg-type]
 
         pygame.draw.ellipse(surface, hull_col, (cx - 110, cy - 22, 220, 60))
         pygame.draw.ellipse(surface, BG,       (cx - 88,  cy - 12, 176, 40))
@@ -465,15 +532,335 @@ class Boss:
         for lx in [-80, -52, -24, 4, 32, 60, 80]:
             pygame.draw.circle(surface, lc, (cx + lx, cy + 22), 6)
 
-        bar_w   = 220
-        bar_h   = 12
-        hp_frac = self.hp / self.max_hp
-        bar_col = LIME if hp_frac > 0.5 else YELLOW if hp_frac > 0.25 else RED
-        bx      = cx - bar_w // 2
-        by_     = cy - 92
-        pygame.draw.rect(surface, (25, 25, 25), (bx, by_, bar_w, bar_h),              border_radius=4)
-        pygame.draw.rect(surface, bar_col,      (bx, by_, int(bar_w * hp_frac), bar_h), border_radius=4)
-        pygame.draw.rect(surface, WHITE,         (bx, by_, bar_w, bar_h), 1,           border_radius=4)
+        self._draw_hp_bar(surface, cx, cy)
+
+
+class Dreadnought(_BossBase):
+    """
+    Armoured warship with a rotating energy shield.
+
+    The shield has a single gap — bullets must pass through it to deal damage.
+    The gap slowly narrows in phase 2.
+    """
+
+    _SHIELD_RADIUS    = 105
+    _SHIELD_THICKNESS = 6
+    _SHIELD_COLOUR    = (80, 180, 255)
+
+    def __init__(self, wave: int) -> None:
+        self._common_init(wave, hp_extra=10)
+        self.shield_angle  = 0.0          # current gap start (radians)
+        self.shield_speed  = 1.1          # rad/s rotation
+        boss_tier          = max(1, wave // BOSS_WAVE_INTERVAL)
+        self.gap_size      = math.pi * 0.45 - boss_tier * 0.02  # narrows with tier
+
+    # ------------------------------------------------------------------
+    def is_hittable(self, bx: float = 0.0, by: float = 0.0) -> bool:
+        """Bullet can hit only when its angle falls inside the shield gap."""
+        angle = math.atan2(by - self.y, bx - self.x) % (2 * math.pi)
+        gap_start = self.shield_angle % (2 * math.pi)
+        gap_end   = (gap_start + self.gap_size) % (2 * math.pi)
+        if gap_start <= gap_end:
+            return gap_start <= angle <= gap_end
+        return angle >= gap_start or angle <= gap_end   # wraps past 2π
+
+    def update(self, dt: float) -> None:
+        self._tick_common(dt)
+        # Faster, tighter movement than Mothership
+        self.x += self.vx * dt
+        self.y  = self.base_y + 28.0 * math.sin(self.wave_timer * 2.2)
+        if self.x > WIDTH - 140 or self.x < 140:
+            self.vx *= -1
+        # Shield rotates; phase 2 spins faster
+        speed = self.shield_speed * (1.6 if self.is_phase2() else 1.0)
+        self.shield_angle = (self.shield_angle + speed * dt) % (2 * math.pi)
+
+    def should_shoot(self) -> bool:
+        # Dreadnought is a slow but relentless shooter — fires in bursts
+        interval = 0.55 if self.is_phase2() else 0.90
+        if self.shoot_timer <= 0:
+            self.shoot_timer = interval + random.uniform(-0.05, 0.05)
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+        ox, oy   = offset
+        cx, cy   = int(self.x) + ox, int(self.y) + oy
+        flashing = self.hit_flash > 0
+        phase2   = self.is_phase2()
+
+        # Glow
+        glow_col = (50, 100, 255, 20) if not phase2 else (50, 200, 255, 28)
+        glow = pygame.Surface((300, 150), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, glow_col, (0, 0, 300, 150))
+        surface.blit(glow, (cx - 150, cy - 75))
+
+        # Hull — heavy rectangular saucer shape
+        hull_col = WHITE if flashing else (CYAN if not phase2 else (180, 240, 255))
+        pygame.draw.ellipse(surface, hull_col,     (cx - 118, cy - 18, 236, 52))
+        pygame.draw.ellipse(surface, (20, 30, 60), (cx - 98,  cy - 10, 196, 36))
+        pygame.draw.ellipse(surface, hull_col,     (cx - 98,  cy - 10, 196, 36), 2)
+        # Dome
+        pygame.draw.ellipse(surface, hull_col,     (cx - 46, cy - 62, 92, 54))
+        pygame.draw.ellipse(surface, BLUE,         (cx - 30, cy - 54, 60, 38))
+
+        # Exhaust lights
+        lc = CYAN if self.anim_frame == 0 else BLUE
+        for lx in range(-90, 95, 24):
+            pygame.draw.circle(surface, lc, (cx + lx, cy + 24), 5)
+
+        # Rotating shield ring (drawn as arc segments, leaving the gap open)
+        r     = self._SHIELD_RADIUS
+        sh_col = (200, 240, 255) if not phase2 else (255, 255, 255)
+        # Full circle minus gap
+        gap_rad   = self.gap_size
+        arc_start = (self.shield_angle + gap_rad) % (2 * math.pi)
+        arc_end   = self.shield_angle
+        # pygame.draw.arc uses screen coords (y-down), angles anti-clockwise
+        # We draw many tiny line segments for a smooth ring
+        segments   = 64
+        prev: tuple[int, int] | None = None
+        for i in range(segments + 1):
+            frac  = i / segments
+            a     = arc_start + (2 * math.pi - gap_rad) * frac
+            # Skip segment if it's in the gap region
+            angle_in_gap = (a - self.shield_angle) % (2 * math.pi) < gap_rad
+            if angle_in_gap:
+                prev = None
+                continue
+            px = cx + int(r * math.cos(a))
+            py = cy + int(r * 0.38 * math.sin(a))  # elliptical
+            if prev is not None:
+                pygame.draw.line(surface, sh_col, prev, (px, py), self._SHIELD_THICKNESS)
+            prev = (px, py)
+
+        # Gap indicator arrow — bright accent at gap centre
+        gap_mid = (self.shield_angle + gap_rad / 2) % (2 * math.pi)
+        arrow_x = cx + int((r - 14) * math.cos(gap_mid))
+        arrow_y = cy + int((r - 14) * 0.38 * math.sin(gap_mid))
+        pygame.draw.circle(surface, YELLOW, (arrow_x, arrow_y), 4)
+
+        self._draw_hp_bar(surface, cx, cy, bar_y_offset=-98)
+
+
+class SwarmQueen(_BossBase):
+    """
+    Organic hive-queen.  At 50 % HP she signals her swarm, spawning a fresh
+    wave of small alien drones that rejoin the enemy grid.
+
+    The game layer checks ``self.boss.spawn_pending`` each frame and, when
+    True, calls ``self.boss.clear_spawn()`` after processing the spawn.
+    """
+
+    _SPAWN_HP_THRESHOLD = 0.50  # fraction of max_hp
+
+    def __init__(self, wave: int) -> None:
+        self._common_init(wave, hp_extra=4)
+        self.spawn_pending  = False
+        self._spawned_once  = False
+        self.pulse_timer    = 0.0   # drives the organic pulsing effect
+
+    def clear_spawn(self) -> None:
+        self.spawn_pending = False
+        self._spawned_once = True
+
+    def take_hit(self) -> bool:
+        killed = super().take_hit()
+        if (
+            not self._spawned_once
+            and not self.spawn_pending
+            and self.hp / self.max_hp <= self._SPAWN_HP_THRESHOLD
+        ):
+            self.spawn_pending = True
+        return killed
+
+    def update(self, dt: float) -> None:
+        self._tick_common(dt)
+        self.pulse_timer += dt
+        self._move_horizontal(dt, margin=160.0)
+
+    def should_shoot(self) -> bool:
+        # Rapid spread pattern — fires frequently in phase 2
+        interval = 0.38 if self.is_phase2() else 0.65
+        if self.shoot_timer <= 0:
+            self.shoot_timer = interval + random.uniform(-0.05, 0.05)
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+        ox, oy   = offset
+        cx, cy   = int(self.x) + ox, int(self.y) + oy
+        flashing = self.hit_flash > 0
+        phase2   = self.is_phase2()
+
+        pulse = 0.5 + 0.5 * math.sin(self.pulse_timer * 4.0)
+
+        # Organic glow
+        glow_r = int(28 + 12 * pulse)
+        glow_a = 20 + int(12 * pulse)
+        glow_col = (200, 50, 255, glow_a)
+        glow = pygame.Surface((300, 150), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, glow_col, (0, 0, 300, 150))
+        surface.blit(glow, (cx - 150, cy - 75))
+
+        body_col  = WHITE if flashing else (HOT_PINK if not phase2 else RED)
+        inner_col = WHITE if flashing else (LIME if not phase2 else ORANGE)
+
+        # Main body — wide organic oval
+        pygame.draw.ellipse(surface, body_col,  (cx - 105, cy - 20, 210, 58))
+        pygame.draw.ellipse(surface, (30, 10, 30),(cx - 86,  cy - 12, 172, 40))
+        pygame.draw.ellipse(surface, body_col,  (cx - 86,  cy - 12, 172, 40), 2)
+
+        # Dome with pulsing core
+        pygame.draw.ellipse(surface, body_col,  (cx - 52, cy - 64, 104, 58))
+        core_r = 20 + int(8 * pulse)
+        pygame.draw.circle(surface, inner_col, (cx, cy - 40), core_r)
+
+        # Tendril legs (8 of them, wave with pulse)
+        for i in range(8):
+            base_a = math.pi * i / 4
+            a      = base_a + 0.3 * math.sin(self.pulse_timer * 3 + base_a)
+            tx     = cx + int(102 * math.cos(a))
+            ty     = cy + int(28  * math.sin(a))
+            pygame.draw.line(surface, body_col, (cx, cy + 18), (tx, ty), 2)
+            pygame.draw.circle(surface, inner_col, (tx, ty), 4)
+
+        # Lights
+        lc = HOT_PINK if self.anim_frame == 0 else LIME
+        for lx in range(-78, 82, 20):
+            pygame.draw.circle(surface, lc, (cx + lx, cy + 26), 5)
+
+        # Spawn-pending warning flash
+        if self.spawn_pending:
+            warn_a = int(128 + 127 * math.sin(self.pulse_timer * 14))
+            warn_surf = pygame.Surface((240, 60), pygame.SRCALPHA)
+            pygame.draw.ellipse(warn_surf, (*LIME, warn_a), (0, 0, 240, 60))
+            surface.blit(warn_surf, (cx - 120, cy - 30))
+
+        self._draw_hp_bar(surface, cx, cy, bar_y_offset=-96)
+
+
+class Phantom(_BossBase):
+    """
+    Cloaking boss — alternates between visible and invisible phases.
+
+    While cloaked, bullets pass straight through (is_hittable returns False).
+    The boss flickers briefly before vanishing as a warning to the player.
+    """
+
+    # Phase durations (seconds)
+    _VISIBLE_TIME  = 3.8
+    _HIDDEN_TIME   = 2.6
+    _FLICKER_TIME  = 0.6   # at the end of visible phase — rapid flicker warning
+
+    def __init__(self, wave: int) -> None:
+        self._common_init(wave, hp_extra=2)
+        self._phase_timer  = 0.0
+        self._visible      = True
+        self._flicker_tick = 0.0
+
+    @property
+    def visual_alpha(self) -> int:
+        """0-255 alpha for rendering the boss body."""
+        if self._visible:
+            time_left = self._VISIBLE_TIME - self._phase_timer
+            if time_left < self._FLICKER_TIME:
+                # Rapid flicker warning
+                return 255 if int(self._flicker_tick * 10) % 2 == 0 else 60
+            return 255
+        # Hidden phase — ghost silhouette only
+        return 22
+
+    def is_hittable(self, bx: float = 0.0, by: float = 0.0) -> bool:
+        return self._visible and self.visual_alpha > 128
+
+    def update(self, dt: float) -> None:
+        self._tick_common(dt)
+        self._move_horizontal(dt)
+        self._phase_timer  += dt
+        self._flicker_tick += dt
+        threshold = self._VISIBLE_TIME if self._visible else self._HIDDEN_TIME
+        # Phase 2: shorter hidden windows keep pressure on
+        if not self._visible and self.is_phase2():
+            threshold = max(1.4, self._HIDDEN_TIME - 0.6)
+        if self._phase_timer >= threshold:
+            self._phase_timer = 0.0
+            self._visible     = not self._visible
+
+    def should_shoot(self) -> bool:
+        # Phantom only shoots while visible
+        if not self._visible:
+            return False
+        interval = 0.50 if self.is_phase2() else 0.80
+        if self.shoot_timer <= 0:
+            self.shoot_timer = interval + random.uniform(-0.07, 0.07)
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+        alpha = self.visual_alpha
+        if alpha < 5:
+            return
+
+        ox, oy   = offset
+        cx, cy   = int(self.x) + ox, int(self.y) + oy
+        flashing = self.hit_flash > 0
+        phase2   = self.is_phase2()
+
+        # Render onto an alpha surface so the whole sprite can fade
+        ghost = pygame.Surface((300, 200), pygame.SRCALPHA)
+        gcx, gcy = 150, 100    # centre within the ghost surface
+
+        glow_col = (180, 50, 255, int(18 * alpha / 255))
+        pygame.draw.ellipse(ghost, glow_col, (0, 30, 300, 140))
+
+        hull_a   = alpha
+        hull_col = (255, 255, 255, hull_a) if flashing else (
+            (200, 80, 255, hull_a) if not phase2 else (255, 100, 100, hull_a)
+        )
+        dome_col = hull_col
+
+        pygame.draw.ellipse(ghost, hull_col, (gcx - 110, gcy - 18, 220, 52))
+        pygame.draw.ellipse(ghost, (0, 0, 0, hull_a), (gcx - 90, gcy - 10, 180, 36))
+        pygame.draw.ellipse(ghost, hull_col,           (gcx - 90, gcy - 10, 180, 36), 2)
+        pygame.draw.ellipse(ghost, dome_col,           (gcx - 52, gcy - 62, 104, 56))
+        pygame.draw.ellipse(ghost, (100, 0, 200, hull_a), (gcx - 28, gcy - 52, 56, 36))
+
+        # Lights
+        lc = (200, 100, 255, hull_a) if self.anim_frame == 0 else (255, 200, 100, hull_a)
+        for lx in range(-78, 82, 22):
+            pygame.draw.circle(ghost, lc, (gcx + lx, gcy + 22), 5)
+
+        surface.blit(ghost, (cx - 150, cy - 100))
+
+        # Always draw HP bar at full opacity so the player has feedback
+        self._draw_hp_bar(surface, cx, cy, bar_y_offset=-102)
+
+
+# ── Boss factory ───────────────────────────────────────────────────────────────
+
+def make_boss(wave: int) -> _BossBase:
+    """
+    Return the appropriate boss for the given wave number.
+
+    Wave 5  → Mothership (always first encounter)
+    Wave 10 → Dreadnought
+    Wave 15 → SwarmQueen
+    Wave 20 → Phantom
+    Wave 25 → Mothership (cycle repeats, scaling with wave)
+    """
+    boss_number = (wave // BOSS_WAVE_INTERVAL - 1) % 4
+    if boss_number == 0:
+        return Mothership(wave)
+    if boss_number == 1:
+        return Dreadnought(wave)
+    if boss_number == 2:
+        return SwarmQueen(wave)
+    return Phantom(wave)
+
+
+# Alias kept for any external code that still imports 'Boss'
+Boss = Mothership
 
 
 # ── Ship Fragment (death effect) ──────────────────────────────────────────────
@@ -532,6 +919,122 @@ class ShipFragment:
             pygame.draw.polygon(surface, col, pts)   # type: ignore[arg-type]
 
 
+# ── Pixel-art sprite patterns ─────────────────────────────────────────────────
+#
+# Each pattern is a tuple of 8 strings, each exactly 11 characters wide.
+# '#' = filled pixel  ' ' = transparent
+# Sprites are rendered via draw_sprite() which scales each pixel to pixel_size².
+# There are 3 tiers matching the classic Space Invaders row layout:
+#   tier 0 — Squid  (top 2 rows,  high score)
+#   tier 1 — Crab   (middle rows, mid  score)
+#   tier 2 — Octopus(bottom rows, base score)
+
+SPRITE_SQUID_A: tuple[str, ...] = (
+    "   ## ##   ",
+    "  #######  ",
+    " ######### ",
+    "## ## ## ##",
+    "###########",
+    "  ## # ##  ",
+    " #  # #  # ",
+    "#  #   #  #",
+)
+SPRITE_SQUID_B: tuple[str, ...] = (
+    "   ## ##   ",
+    "  #######  ",
+    " ######### ",
+    "## ## ## ##",
+    "###########",
+    "  ## # ##  ",
+    "##  # #  ##",
+    " #       # ",
+)
+
+SPRITE_CRAB_A: tuple[str, ...] = (
+    "#         #",
+    " ##  #  ## ",
+    " ######### ",
+    "###  #  ###",
+    " ######### ",
+    "  #  #  #  ",
+    " ## ### ## ",
+    "#  #   #  #",
+)
+SPRITE_CRAB_B: tuple[str, ...] = (
+    "#         #",
+    " ##  #  ## ",
+    " ######### ",
+    "###  #  ###",
+    " ######### ",
+    "  #  #  #  ",
+    "## ### ### ",
+    "  #   #   #",
+)
+
+SPRITE_OCTOPUS_A: tuple[str, ...] = (
+    "  ## # ##  ",
+    " ######### ",
+    "## #   # ##",
+    " ######### ",
+    "  ## # ##  ",
+    " # # # # # ",
+    "# #  #  # #",
+    " #       # ",
+)
+SPRITE_OCTOPUS_B: tuple[str, ...] = (
+    "  ## # ##  ",
+    " ######### ",
+    "## #   # ##",
+    " ######### ",
+    "  ## # ##  ",
+    " # # # # # ",
+    "  # # # #  ",
+    "#  #   #  #",
+)
+
+# Lookup: tier → (frame_a, frame_b)
+_ALIEN_SPRITES: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    0: (SPRITE_SQUID_A,   SPRITE_SQUID_B),
+    1: (SPRITE_CRAB_A,    SPRITE_CRAB_B),
+    2: (SPRITE_OCTOPUS_A, SPRITE_OCTOPUS_B),
+}
+
+_PIXEL_SIZE = 4   # screen pixels per sprite "pixel"
+
+
+def draw_sprite(
+    surface: pygame.Surface,
+    x: int,
+    y: int,
+    colour: tuple[int, int, int],
+    pattern: tuple[str, ...],
+    pixel_size: int = _PIXEL_SIZE,
+    size_mult: float = 1.0,
+) -> None:
+    """
+    Render a pixel-art sprite centred on (x, y).
+
+    Each '#' in *pattern* becomes a solid square of side *pixel_size × size_mult*.
+    A subtle highlight square (top-left corner, half size) is drawn at 1.4× brightness
+    to give the classic CRT-lit pixel look.
+    """
+    ps = max(1, int(pixel_size * size_mult))
+    hs = max(1, ps // 2)            # highlight size
+    rows = len(pattern)
+    cols = len(pattern[0]) if pattern else 0
+    off_x = x - (cols * ps) // 2
+    off_y = y - (rows * ps) // 2
+    hi = tuple(min(255, int(c * 1.4)) for c in colour)
+    for row_idx, row_str in enumerate(pattern):
+        for col_idx, ch in enumerate(row_str):
+            if ch == "#":
+                rx = off_x + col_idx * ps
+                ry = off_y + row_idx * ps
+                pygame.draw.rect(surface, colour, (rx, ry, ps, ps))
+                if ps >= 3:                   # only add highlight at a readable scale
+                    pygame.draw.rect(surface, hi, (rx, ry, hs, hs))  # type: ignore[arg-type]
+
+
 # ── Draw helpers ──────────────────────────────────────────────────────────────
 
 def draw_ship(
@@ -580,38 +1083,11 @@ def draw_alien_a(
     y: int,
     colour: tuple[int, int, int],
     size: float = 1.0,
+    tier: int = 0,
 ) -> None:
-    w, h = int(22 * size), int(18 * size)
-    s = size
-    pts = [
-        (x - w,           y - h),
-        (x - w - int(7*s),y - h - int(10*s)),
-        (x - w + int(7*s),y - h),
-        (x - int(5*s),    y - h - int(4*s)),
-        (x + int(5*s),    y - h - int(4*s)),
-        (x + w - int(7*s),y - h),
-        (x + w + int(7*s),y - h - int(10*s)),
-        (x + w,           y - h),
-        (x + w + int(3*s),y),
-        (x + w,           y + h),
-        (x + w // 2,      y + h + int(7*s)),
-        (x + int(4*s),    y + h + int(3*s)),
-        (x,               y + h),
-        (x - int(4*s),    y + h + int(3*s)),
-        (x - w // 2,      y + h + int(7*s)),
-        (x - w,           y + h),
-        (x - w - int(3*s),y),
-    ]
-    pygame.draw.polygon(surface, colour, pts)
-    eye_r = max(1, int(5*s))
-    pygame.draw.circle(surface, BG,    (x - int(7*s), y - int(3*s)), eye_r)
-    pygame.draw.circle(surface, BG,    (x + int(7*s), y - int(3*s)), eye_r)
-    hr = max(1, int(2*s))
-    pygame.draw.circle(surface, WHITE, (x - int(5*s), y - int(5*s)), hr)
-    pygame.draw.circle(surface, WHITE, (x + int(9*s), y - int(5*s)), hr)
-    ar = max(1, int(2*s))
-    pygame.draw.circle(surface, colour, (x - w - int(7*s), y - h - int(12*s)), ar)
-    pygame.draw.circle(surface, colour, (x + w + int(7*s), y - h - int(12*s)), ar)
+    """Draw animation frame A of an alien sprite centred on (x, y)."""
+    pattern = _ALIEN_SPRITES[min(tier, 2)][0]
+    draw_sprite(surface, x, y, colour, pattern, size_mult=size)
 
 
 def draw_alien_b(
@@ -620,34 +1096,8 @@ def draw_alien_b(
     y: int,
     colour: tuple[int, int, int],
     size: float = 1.0,
+    tier: int = 0,
 ) -> None:
-    w, h = int(22 * size), int(18 * size)
-    s = size
-    pts = [
-        (x,                y - h - int(5*s)),
-        (x - int(8*s),    y - h),
-        (x - w,            y - h),
-        (x - w - int(10*s),y - int(4*s)),
-        (x - w - int(12*s),y),
-        (x - w - int(10*s),y + int(4*s)),
-        (x - w,            y + h),
-        (x - w // 2,       y + h - int(5*s)),
-        (x - int(4*s),    y + h + int(4*s)),
-        (x,                y + h),
-        (x + int(4*s),    y + h + int(4*s)),
-        (x + w // 2,       y + h - int(5*s)),
-        (x + w,            y + h),
-        (x + w + int(10*s),y + int(4*s)),
-        (x + w + int(12*s),y),
-        (x + w + int(10*s),y - int(4*s)),
-        (x + w,            y - h),
-        (x + int(8*s),    y - h),
-    ]
-    pygame.draw.polygon(surface, colour, pts)
-    eye_r = max(1, int(5*s))
-    pygame.draw.circle(surface, BG,    (x - int(7*s), y - int(3*s)), eye_r)
-    pygame.draw.circle(surface, BG,    (x + int(7*s), y - int(3*s)), eye_r)
-    hr = max(1, int(2*s))
-    pygame.draw.circle(surface, WHITE, (x - int(5*s), y - int(5*s)), hr)
-    pygame.draw.circle(surface, WHITE, (x + int(9*s), y - int(5*s)), hr)
-    pygame.draw.circle(surface, colour, (x, y - h - int(7*s)), max(1, int(3*s)))
+    """Draw animation frame B of an alien sprite centred on (x, y)."""
+    pattern = _ALIEN_SPRITES[min(tier, 2)][1]
+    draw_sprite(surface, x, y, colour, pattern, size_mult=size)

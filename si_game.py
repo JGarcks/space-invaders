@@ -38,12 +38,15 @@ from si_constants import (
     CODENAME_ADJECTIVES, CODENAME_NOUNS,
     SPEED_BONUS_THRESHOLD, SPEED_BONUS_POINTS,
     FLAWLESS_BONUS_POINTS,
+    SECTOR_DATA, SECTOR_TRANSITION_DURATION, SECTOR_BG_LERP_SPEED,
+    BOSS_TITLES,
 )
 from si_audio import SoundManager
 from si_entities import (
     Alien, Bullet, EnemyBullet,
     Particle, Star, PowerUp, AchievementBanner, ComboPopup,
-    UFO, Barrier, DiveBomber, Boss, ShipFragment,
+    UFO, Barrier, DiveBomber, ShipFragment,
+    Mothership, Dreadnought, SwarmQueen, Phantom, make_boss,
     draw_ship, draw_alien_a, draw_alien_b,
 )
 from si_persistence import (
@@ -183,7 +186,7 @@ class Game:
         self.powerup_drop_chance = DIFFICULTY_SETTINGS[self.difficulty]["powerup"]
 
         self.next_life_milestone_idx = 0
-        self.boss: Boss | None = None
+        self.boss: Mothership | Dreadnought | SwarmQueen | Phantom | None = None
 
         self.wave_summary_timer = 0.0
         self.wave_summary_data: dict = {}
@@ -227,7 +230,44 @@ class Game:
         self.boss_cinematic_x     = 0.0
         self.boss_cinematic_y     = 0.0
 
+        # ── Sector theme state ────────────────────────────────────────────────
+        self.current_sector: int            = 0
+        sector                              = SECTOR_DATA[0]
+        self.sector_bg: list[float]         = list(float(c) for c in sector["bg"])
+        self.sector_bg_target: list[float]  = list(float(c) for c in sector["bg"])
+        self.sector_star_tint: tuple[int, int, int] = sector["star_tint"]
+        self.sector_transition_timer: float = 0.0
+        self.sector_transition_name:  str   = ""
+        self.sector_transition_sub:   str   = ""
+
+        # ── Boss title card state ─────────────────────────────────────────────
+        self.boss_title_timer: float = 0.0
+        self.boss_title_name:  str   = ""
+        self.boss_title_sub:   str   = ""
+
         self._spawn_wave()
+
+    def _spawn_swarm_queen_drones(self) -> None:
+        """Spawn a mini alien swarm when the SwarmQueen calls for reinforcements."""
+        drone_hp    = 1
+        drone_colour = LIME
+        sprite_tier = 0   # squid tier — small and fast-looking
+        count       = min(6 + self.wave // 5, 14)
+        xs = [
+            ALIEN_X_START + col * ALIEN_X_SPACING
+            for col in range(ALIEN_COLS)
+        ]
+        random.shuffle(xs)
+        for i in range(count):
+            ax = xs[i % len(xs)] + random.randint(-40, 40)
+            ay = ALIEN_Y_START + random.randint(-40, 60)
+            self.aliens.append(
+                Alien(x=float(ax), y=float(ay), colour=drone_colour,
+                      hp=drone_hp, sprite_tier=sprite_tier)
+            )
+        # Short flash/shake to signal the spawn event
+        self._add_shake(6, 0.3)
+        self.banners.append(AchievementBanner("SWARM!", self.font_sm))
 
     def _make_barriers(self) -> list[Barrier]:
         barriers = []
@@ -245,18 +285,28 @@ class Game:
         diff = DIFFICULTY_SETTINGS[self.difficulty]
 
         if self.wave % BOSS_WAVE_INTERVAL == 0:
-            self.boss = Boss(self.wave)
+            self.boss = make_boss(self.wave)
             self.sfx.play("boss")
+            # Show boss title card
+            boss_key = type(self.boss).__name__
+            title, sub = BOSS_TITLES.get(boss_key, (boss_key, ""))
+            self.boss_title_name  = title
+            self.boss_title_sub   = sub
+            self.boss_title_timer = 3.8
         else:
             y_offset = min((self.wave - 1) * 8, 100)
             rows     = min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
             alien_hp = min(3, 1 + (self.wave - 1) // 10)
             for row in range(rows):
+                # Sprite tier: top rows=squid(0), mid=crab(1), bottom=octopus(2)
+                sprite_tier = min(2, row // 2)
                 for col in range(ALIEN_COLS):
                     ax     = ALIEN_X_START + col * ALIEN_X_SPACING
                     ay     = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset
                     colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
-                    self.aliens.append(Alien(x=ax, y=ay, colour=colour, hp=alien_hp))
+                    self.aliens.append(
+                        Alien(x=ax, y=ay, colour=colour, hp=alien_hp, sprite_tier=sprite_tier)
+                    )
 
         self.alien_dir = 1
         raw_speed = ALIEN_START_SPEED * (1 + 0.015 * (self.wave - 1)) * diff["speed"]
@@ -584,6 +634,12 @@ class Game:
     def _update_wave_summary(self, dt: float) -> None:
         self.wave_summary_timer -= dt
         self.wave_clear_flash = max(0.0, self.wave_clear_flash - dt * 2.0)
+        # Keep sector lerp and transition banner ticking during summary screen
+        for i in range(3):
+            diff = self.sector_bg_target[i] - self.sector_bg[i]
+            self.sector_bg[i] += diff * min(1.0, SECTOR_BG_LERP_SPEED * dt)
+        if self.sector_transition_timer > 0:
+            self.sector_transition_timer -= dt
         self.particles    = [p for p in self.particles if p.update(dt)]
         self.combo_popups = [c for c in self.combo_popups if c.update(dt)]
         alive_banners = []
@@ -615,6 +671,19 @@ class Game:
             self.bomb_flash_timer -= dt
 
         self.wave_clear_flash = max(0.0, self.wave_clear_flash - dt * 2.0)
+
+        # Sector background colour lerp (exponential approach toward target)
+        for i in range(3):
+            diff = self.sector_bg_target[i] - self.sector_bg[i]
+            self.sector_bg[i] += diff * min(1.0, SECTOR_BG_LERP_SPEED * dt)
+
+        # Boss title card countdown
+        if self.boss_title_timer > 0:
+            self.boss_title_timer -= dt
+
+        # Sector transition banner countdown
+        if self.sector_transition_timer > 0:
+            self.sector_transition_timer -= dt
 
         # Low-life heartbeat
         if self.lives == 1:
@@ -1109,11 +1178,19 @@ class Game:
                 if bi in bullets_hit:
                     continue
                 if abs(b.x - self.boss.x) < 108 and abs(b.y - self.boss.y) < 42:
+                    # Check variant-specific hit rules (Dreadnought shield gap,
+                    # Phantom cloaking).  Bullets that fail just pass through.
+                    if not self.boss.is_hittable(b.x, b.y):
+                        continue
                     bullets_hit.add(bi)
                     self.shots_hit += 1
                     killed = self.boss.take_hit()
                     self._add_shake(3, 0.1)
                     self.sfx.play("explode")
+                    # SwarmQueen: spawn a mini-drone wave when she signals
+                    if isinstance(self.boss, SwarmQueen) and self.boss.spawn_pending:
+                        self._spawn_swarm_queen_drones()
+                        self.boss.clear_spawn()
                     if killed:
                         pts = 500 + self.wave * 50
                         self.score += pts
@@ -1246,6 +1323,17 @@ class Game:
 
             cleared_wave = self.wave
             self.wave   += 1
+
+            # ── Sector transition check ───────────────────────────────────────
+            new_sector = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
+            if new_sector != self.current_sector:
+                self.current_sector        = new_sector
+                sd                         = SECTOR_DATA[new_sector]
+                self.sector_bg_target      = [float(c) for c in sd["bg"]]
+                self.sector_star_tint      = sd["star_tint"]
+                self.sector_transition_name = sd["name"]
+                self.sector_transition_sub  = sd["subtitle"]
+                self.sector_transition_timer = SECTOR_TRANSITION_DURATION
             if self.wave == 5:
                 self._try_achievement("Wave 5")
             if self.wave == 10:
@@ -1369,7 +1457,9 @@ class Game:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw(self) -> None:
-        self.screen.fill(BG)
+        # Dynamic sector background colour
+        bg_col = tuple(max(0, min(255, int(c))) for c in self.sector_bg)
+        self.screen.fill(bg_col)  # type: ignore[arg-type]
 
         offset = [0, 0]
         if self.shake_timer > 0:
@@ -1377,7 +1467,7 @@ class Game:
             offset[1] = random.randint(-self.shake_intensity, self.shake_intensity)
 
         for star in self.stars:
-            star.draw(self.screen, offset)
+            star.draw(self.screen, offset, tint=self.sector_star_tint)
 
         if self.state == GameState.TITLE:
             self._draw_title(offset)
@@ -1557,7 +1647,8 @@ class Game:
                 col = tuple(max(0, c - 120) for c in a.colour)  # type: ignore[assignment]
             else:
                 col = a.colour
-            draw_fn(self.screen, int(a.x) + ox, int(a.y) + oy, col)
+            draw_fn(self.screen, int(a.x) + ox, int(a.y) + oy, col,
+                    tier=a.sprite_tier)
 
         for diver in self.dive_bombers:
             diver.draw(self.screen, offset)
@@ -1629,6 +1720,14 @@ class Game:
         if self.boss_cinematic_timer > 0:
             bt = self.font_med.render("BOSS  DESTROYED!", True, ORANGE)
             self.screen.blit(bt, (WIDTH // 2 - bt.get_width() // 2, HEIGHT // 2 - 40))
+
+        # ── Boss title card ───────────────────────────────────────────────────
+        if self.boss_title_timer > 0:
+            self._draw_boss_title_card()
+
+        # ── Sector transition banner ──────────────────────────────────────────
+        if self.sector_transition_timer > 0:
+            self._draw_sector_transition()
 
         self._draw_hud()
         self._draw_frenzy_overlay()
@@ -1721,6 +1820,83 @@ class Game:
             shadow_s.set_alpha(alpha // 2)
             self.screen.blit(shadow_s, (bx + 4, by_ + 4))
             self.screen.blit(scaled,   (bx,     by_))
+
+    def _draw_boss_title_card(self) -> None:
+        """Full-width cinematic title card that appears when a boss spawns."""
+        t         = self.boss_title_timer
+        duration  = 3.8
+        # Fade in for first 0.5 s, stay solid, fade out in last 0.6 s
+        if t > duration - 0.5:
+            alpha = int(255 * (duration - t) / 0.5)
+        elif t < 0.6:
+            alpha = int(255 * (t / 0.6))
+        else:
+            alpha = 255
+
+        # Dark overlay bar
+        overlay = pygame.Surface((WIDTH, 180), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, int(alpha * 0.65)))
+        self.screen.blit(overlay, (0, HEIGHT // 2 - 90))
+
+        # Red scan line accent
+        for dy in (0, 178):
+            line_surf = pygame.Surface((WIDTH, 2), pygame.SRCALPHA)
+            line_surf.fill((*RED, alpha))
+            self.screen.blit(line_surf, (0, HEIGHT // 2 - 90 + dy))
+
+        # Title text
+        title_surf = self.font_big.render(self.boss_title_name, True, RED)
+        title_surf.set_alpha(alpha)
+        tx = WIDTH // 2 - title_surf.get_width() // 2
+        self.screen.blit(title_surf, (tx, HEIGHT // 2 - 72))
+
+        # Subtitle text
+        sub_surf = self.font_med.render(self.boss_title_sub, True, DIM_WHITE)
+        sub_surf.set_alpha(alpha)
+        sx = WIDTH // 2 - sub_surf.get_width() // 2
+        self.screen.blit(sub_surf, (sx, HEIGHT // 2 + 20))
+
+    def _draw_sector_transition(self) -> None:
+        """Slide-in banner announcing a new sector."""
+        t         = self.sector_transition_timer
+        duration  = SECTOR_TRANSITION_DURATION
+        # Slide in from top during first 0.4 s, hold, fade out in last 0.5 s
+        if t > duration - 0.4:
+            slide = 1.0 - (duration - t) / 0.4
+        elif t < 0.5:
+            slide = 0.0
+            alpha = int(255 * (t / 0.5))
+        else:
+            slide = 0.0
+            alpha = 255
+        if t >= 0.5:
+            alpha = 255
+
+        slide_offset = int(-220 * slide)
+        banner_h     = 110
+        banner_y     = 36 + slide_offset
+
+        overlay = pygame.Surface((WIDTH, banner_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, int(alpha * 0.75)))
+        self.screen.blit(overlay, (0, banner_y))
+
+        # Accent lines
+        for dy in (0, banner_h - 2):
+            line_surf = pygame.Surface((WIDTH, 2), pygame.SRCALPHA)
+            line_surf.fill((*CYAN, alpha))
+            self.screen.blit(line_surf, (0, banner_y + dy))
+
+        name_surf = self.font_lv.render(self.sector_transition_name, True, CYAN)
+        name_surf.set_alpha(alpha)
+        self.screen.blit(name_surf,
+                         (WIDTH // 2 - name_surf.get_width() // 2,
+                          banner_y + 10))
+
+        sub_surf = self.font_med.render(self.sector_transition_sub, True, DIM_WHITE)
+        sub_surf.set_alpha(alpha)
+        self.screen.blit(sub_surf,
+                         (WIDTH // 2 - sub_surf.get_width() // 2,
+                          banner_y + 62))
 
     def _draw_hud(self) -> None:
         panel = pygame.Surface((400, 45), pygame.SRCALPHA)
@@ -2005,11 +2181,16 @@ class Game:
             self.screen.blit(skip_txt, (cx - skip_txt.get_width() // 2,
                                          panel_y + panel_h - 36))
 
+        # Show sector transition banner if one just triggered
+        if self.sector_transition_timer > 0:
+            self._draw_sector_transition()
+
     def _draw_gameover(self, offset: list[int]) -> None:
         draw_fn = draw_alien_a if self.alien_frame == 0 else draw_alien_b
         for a in self.aliens:
             draw_fn(self.screen,
-                    int(a.x) + offset[0], int(a.y) + offset[1], a.colour)
+                    int(a.x) + offset[0], int(a.y) + offset[1], a.colour,
+                    tier=a.sprite_tier)
 
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 120))

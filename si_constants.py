@@ -189,3 +189,25 @@ SPEED_BONUS_POINTS    = 500
 
 # ── Flawless bonus ─────────────────────────────────────────────────────────────
 FLAWLESS_BONUS_POINTS = 2000
+
+# ── Sector themes ─────────────────────────────────────────────────────────────
+# Each sector spans 10 waves.  bg is the target background colour (RGB int
+# triple); star_tint is multiplied per-channel onto each star's base colour.
+SECTOR_DATA: list[dict] = [
+    {"name": "SECTOR  I",   "subtitle": "Deep Space",    "bg": (10,  10,  46),  "star_tint": (200, 210, 255)},
+    {"name": "SECTOR  II",  "subtitle": "Nebula Field",  "bg": (22,   5,  38),  "star_tint": (255, 180, 255)},
+    {"name": "SECTOR  III", "subtitle": "Asteroid Belt", "bg": (14,  11,   8),  "star_tint": (210, 180, 140)},
+    {"name": "SECTOR  IV",  "subtitle": "Solar Flare",   "bg": (28,  14,   4),  "star_tint": (255, 240, 180)},
+    {"name": "SECTOR  V",   "subtitle": "Deep Anomaly",  "bg": ( 4,   4,   6),  "star_tint": (180, 255, 255)},
+]
+SECTOR_TRANSITION_DURATION = 4.0   # seconds the banner stays on screen
+SECTOR_BG_LERP_SPEED       = 0.8   # fraction per second (exponential lerp)
+
+# ── Boss title cards ──────────────────────────────────────────────────────────
+# Keyed by the class name returned by type(boss).__name__
+BOSS_TITLES: dict[str, tuple[str, str]] = {
+    "Mothership":  ("THE  MOTHERSHIP",   "Prepare for impact."),
+    "Dreadnought": ("THE  DREADNOUGHT",  "Find the gap in the shield."),
+    "SwarmQueen":  ("THE  SWARM  QUEEN", "She never fights alone."),
+    "Phantom":     ("THE  PHANTOM",      "You can't hit what you can't see."),
+}
