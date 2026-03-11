@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pygame pyinstaller
+        run: pip install pygame numpy pyinstaller
 
       - name: Build Windows EXE
         run: pyinstaller --onefile --windowed --name SpaceInvaders space_invaders.py
@@ -39,7 +39,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pygame pyinstaller
+        run: pip install pygame numpy pyinstaller
 
       - name: Build macOS app
         run: pyinstaller --onefile --windowed --name SpaceInvaders space_invaders.py
@@ -81,7 +81,7 @@ jobs:
             | Platform | File |
             |----------|------|
             | 🪟 Windows | `SpaceInvaders-Windows.exe` |
-            | 🍎 macOS   | `SpaceInvaders-macOS.zip`  |
+            | 🍎 macOS | `SpaceInvaders-macOS.zip` |
 
             **macOS:** unzip, then right-click → Open if you see a security warning.
           files: |
