@@ -74,7 +74,7 @@ Pre-built executables are automatically built via GitHub Actions on every push.
 
 | Platform | Download |
 |----------|----------|
-| Windows | [SpaceInvaders-Windows.exe](../../releases/latest/download/SpaceInvaders-Windows.exe) |
+| Windows | [SpaceInvaders.exe](../../releases/latest/download/SpaceInvaders.exe) |
 | macOS | [SpaceInvaders-macOS.zip](../../releases/latest/download/SpaceInvaders-macOS.zip) |
 
 macOS note: If you see "unidentified developer", right-click the app then choose Open.
