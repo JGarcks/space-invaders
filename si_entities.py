@@ -35,6 +35,18 @@ class Alien:
     hp: int
     hit_flash: float = 0.0
     sprite_tier: int = 0   # 0=squid (top rows), 1=crab (mid), 2=octopus (bottom)
+    # Movement pattern fields
+    grid_col: int = 0
+    grid_row: int = 0
+    base_x: float = 0.0
+    base_y: float = 0.0
+    entry_progress: float = 1.0   # 0.0=off-screen, 1.0=locked in grid
+    entry_start_x: float = 0.0
+    entry_start_y: float = 0.0
+    entry_delay: float = 0.0     # seconds before this alien starts flying in
+    is_anchor: bool = False       # True for the orbital ring anchor alien
+    scatter_vx: float = 0.0
+    scatter_vy: float = 0.0
 
 
 # ── Player bullet ─────────────────────────────────────────────────────────────
@@ -350,6 +362,11 @@ class DiveBomber:
         self.sprite_tier = alien.sprite_tier
         self.start_x = alien.x
         self.start_y = alien.y
+        # Preserve grid identity for return-to-formation
+        self.grid_col = alien.grid_col
+        self.grid_row = alien.grid_row
+        self.base_x   = alien.base_x
+        self.base_y   = alien.base_y
         self.phase   = "dive"   # "dive" → "return" → alive = False
         self.vx      = 0.0
         self.alive   = True
@@ -379,6 +396,61 @@ class DiveBomber:
                 self.y = self.start_y
                 self.returned = True
                 self.alive = False
+
+    def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
+        ox, oy = offset
+        draw_fn = draw_alien_a if self.anim_frame == 0 else draw_alien_b
+        draw_fn(surface, int(self.x) + ox, int(self.y) + oy, self.colour, 1.25,
+                tier=self.sprite_tier)
+        trail = pygame.Surface((50, 60), pygame.SRCALPHA)
+        pygame.draw.ellipse(trail, (*self.colour, 35), (0, 0, 50, 60))
+        surface.blit(trail, (int(self.x) + ox - 25, int(self.y) + oy - 30))
+
+
+# ── Galaga Diver ──────────────────────────────────────────────────────────────
+
+class GalagaDiver:
+    """Coordinated Galaga-style diver: follows a cubic Bezier arc toward the player."""
+
+    def __init__(self, alien: Alien, player_x: float, player_y: float,
+                 loop_side: int) -> None:
+        self.x           = alien.x
+        self.y           = alien.y
+        self.colour      = alien.colour
+        self.sprite_tier = alien.sprite_tier
+        self.alive       = True
+        self.t           = 0.0
+        self.anim_timer  = 0.0
+        self.anim_frame  = 0
+        # Cubic Bezier control points:
+        # P0 = alien start, P1 = arc out to side, P2 = swoop toward player,
+        # P3 = near player
+        px0, py0 = alien.x, alien.y
+        px3, py3 = player_x, player_y - 60
+        px1 = alien.x + loop_side * 480
+        py1 = alien.y + 120
+        px2 = player_x + loop_side * 220
+        py2 = player_y - 320
+        self._p        = [(px0, py0), (px1, py1), (px2, py2), (px3, py3)]
+        self._duration = 2.5
+
+    @staticmethod
+    def _bezier(t: float, pts: list) -> tuple[float, float]:
+        p0, p1, p2, p3 = pts
+        u  = 1.0 - t
+        bx = u**3*p0[0] + 3*u**2*t*p1[0] + 3*u*t**2*p2[0] + t**3*p3[0]
+        by = u**3*p0[1] + 3*u**2*t*p1[1] + 3*u*t**2*p2[1] + t**3*p3[1]
+        return bx, by
+
+    def update(self, dt: float) -> None:
+        self.anim_timer += dt
+        if self.anim_timer >= 0.12:
+            self.anim_timer = 0.0
+            self.anim_frame = 1 - self.anim_frame
+        self.t = min(1.0, self.t + dt / self._duration)
+        self.x, self.y = self._bezier(self.t, self._p)
+        if self.t >= 1.0:
+            self.alive = False
 
     def draw(self, surface: pygame.Surface, offset: list[int]) -> None:
         ox, oy = offset

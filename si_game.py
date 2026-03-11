@@ -40,12 +40,14 @@ from si_constants import (
     FLAWLESS_BONUS_POINTS,
     SECTOR_DATA, SECTOR_TRANSITION_DURATION, SECTOR_BG_LERP_SPEED,
     BOSS_TITLES,
+    PRESSURE_PULSE_INTERVAL, PRESSURE_PULSE_DROP,
+    PRESSURE_PULSE_BOOST, PRESSURE_PULSE_DURATION,
 )
 from si_audio import SoundManager
 from si_entities import (
     Alien, Bullet, EnemyBullet,
     Particle, Star, PowerUp, AchievementBanner, ComboPopup,
-    UFO, Barrier, DiveBomber, ShipFragment,
+    UFO, Barrier, DiveBomber, GalagaDiver, ShipFragment,
     Mothership, Dreadnought, SwarmQueen, Phantom, make_boss,
     draw_ship, draw_alien_a, draw_alien_b,
 )
@@ -54,6 +56,7 @@ from si_persistence import (
     load_achievements, save_achievement,
     save_json,
 )
+from si_movement import create_movement_pattern, OrbitalRing, PredatorLockOn, SerpentChain
 from si_constants import HIGHSCORE_FILE
 
 
@@ -157,6 +160,7 @@ class Game:
         self.enemy_bullets: list[EnemyBullet] = []
         self.enemy_shoot_timer    = 0.0
         self.enemy_shoot_interval = ENEMY_SHOOT_INTERVAL
+        self._base_shoot_interval = ENEMY_SHOOT_INTERVAL  # FIX-2: initialise base
         self.enemy_bullet_speed   = ENEMY_BULLET_SPEED
         self.current_alien_drop   = ALIEN_DROP
         self.powerups:    list[PowerUp]          = []
@@ -178,10 +182,15 @@ class Game:
         self.wave_damage_taken      = False
         self.powerups_collected_wave = 0
         self.bomb_flash_timer = 0.0
+        self.last_stand_active = False
+        self.pressure_pulse_timer  = PRESSURE_PULSE_INTERVAL
+        self.pressure_pulse_active = 0.0
         self.ufo: UFO | None = None
         self.ufo_timer = random.uniform(UFO_INTERVAL_MIN, UFO_INTERVAL_MAX)
         self.barriers: list[Barrier] = self._make_barriers()
         self.dive_bombers: list[DiveBomber] = []
+        self.galaga_divers: list[GalagaDiver] = []
+        self.galaga_kill_counter = 0
         self.dive_timer = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
         self.powerup_drop_chance = DIFFICULTY_SETTINGS[self.difficulty]["powerup"]
 
@@ -263,7 +272,9 @@ class Game:
             ay = ALIEN_Y_START + random.randint(-40, 60)
             self.aliens.append(
                 Alien(x=float(ax), y=float(ay), colour=drone_colour,
-                      hp=drone_hp, sprite_tier=sprite_tier)
+                      hp=drone_hp, sprite_tier=sprite_tier,
+                      grid_col=i % ALIEN_COLS, grid_row=i // ALIEN_COLS,
+                      base_x=float(ax), base_y=float(ay))
             )
         # Short flash/shake to signal the spawn event
         self._add_shake(6, 0.3)
@@ -305,7 +316,9 @@ class Game:
                     ay     = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset
                     colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
                     self.aliens.append(
-                        Alien(x=ax, y=ay, colour=colour, hp=alien_hp, sprite_tier=sprite_tier)
+                        Alien(x=ax, y=ay, colour=colour, hp=alien_hp,
+                              sprite_tier=sprite_tier,
+                              grid_col=col, grid_row=row, base_x=ax, base_y=ay)
                     )
 
         self.alien_dir = 1
@@ -320,6 +333,7 @@ class Game:
         self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, 0.22)
         self.current_alien_drop   = min(40, ALIEN_DROP + self.wave // 3)
         self.enemy_shoot_timer    = self.enemy_shoot_interval
+        self._base_shoot_interval = self.enemy_shoot_interval   # FIX-2: store base for pulse restore
         self.enemy_bullets        = []
         self.wave_damage_taken    = False
         self.wave_flawless        = True
@@ -328,9 +342,22 @@ class Game:
         self.shots_fired = 0
         self.shots_hit   = 0
         self.dive_bombers = []
+        self.galaga_divers = []
+        self.galaga_kill_counter = 0
         self.dive_timer   = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
         self.wave_kills   = 0
+        self.last_stand_active = False
+        self.pressure_pulse_timer  = PRESSURE_PULSE_INTERVAL
+        self.pressure_pulse_active = 0.0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
+
+        # Create movement pattern for this sector
+        sector = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
+        if self.aliens:
+            self.movement_pattern = create_movement_pattern(
+                sector, self.wave, self.aliens, self.current_alien_drop)
+        else:
+            self.movement_pattern = None
 
         if self.active_upgrades.get("regen", 0) > 0:
             for barrier in self.barriers:
@@ -821,7 +848,7 @@ class Game:
                         if self.frenzy_tier > 0 else 1.0)
             drone_cooldown = DRONE_FIRE_COOLDOWN * drone_fm
             self.drone_fire_timer -= dt
-            if self.drone_fire_timer <= 0 and self.aliens:
+            if self.drone_fire_timer <= 0 and (self.aliens or self.boss):
                 self.drone_fire_timer = drone_cooldown
                 drone_x = self.player_x + math.cos(self.drone_angle) * DRONE_ORBIT_RADIUS
                 drone_y = self.player_y + math.sin(self.drone_angle) * DRONE_ORBIT_RADIUS
@@ -848,35 +875,99 @@ class Game:
         # ── Ship fragment update ──────────────────────────────────────────
         self.ship_fragments = [f for f in self.ship_fragments if f.update(dt)]
 
+        # ── Pressure pulse ────────────────────────────────────────────────
+        entering = self.movement_pattern and self.movement_pattern.is_entering()
+        if (self.aliens and not entering
+                and self.boss is None
+                and not getattr(self, 'last_stand_active', False)):
+            self.pressure_pulse_timer -= dt
+            if self.pressure_pulse_timer <= 0:
+                self.pressure_pulse_timer = PRESSURE_PULSE_INTERVAL
+                for a in self.aliens:
+                    a.base_y = min(a.base_y + PRESSURE_PULSE_DROP, BARRIER_Y - 100)
+                self.pressure_pulse_active = PRESSURE_PULSE_DURATION
+                self._add_shake(8, 0.3)
+                self.bomb_flash_timer = 0.4
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 80, 0, self.font_lv,
+                    text="PRESSURE!"))
+        if self.pressure_pulse_active > 0:
+            self.pressure_pulse_active -= dt
+            # FIX-2: apply boost against the BASE interval, not the current one
+            # so the rate restores correctly once the pulse expires
+            self.enemy_shoot_interval = max(
+                0.35,
+                self._base_shoot_interval / PRESSURE_PULSE_BOOST,
+            )
+        else:
+            # Restore to base interval when pulse not active
+            self.enemy_shoot_interval = self._base_shoot_interval
+
         # ── Move aliens ───────────────────────────────────────────────────
-        # Last alien gets a 2× speed boost for tension
-        last_alien_mode = (len(self.aliens) == 1
-                           and not self.boss and not self.dive_bombers)
-        if self.aliens:
-            adx = self.alien_dir * self.alien_speed * (2.0 if last_alien_mode else 1.0) * dt
+        if self.aliens and self.movement_pattern:
+            if self.last_stand_active:
+                for a in self.aliens:
+                    a.x += a.scatter_vx * dt
+                    a.y += a.scatter_vy * dt
+                    a.base_x, a.base_y = a.x, a.y
+                    if a.x < 40:
+                        a.x = 40
+                        a.scatter_vx = abs(a.scatter_vx)
+                    elif a.x > WIDTH - 40:
+                        a.x = WIDTH - 40
+                        a.scatter_vx = -abs(a.scatter_vx)
+                    if a.y < 60:
+                        a.y = 60
+                        a.scatter_vy = abs(a.scatter_vy)
+                    elif a.y > BARRIER_Y - 100:
+                        # FIX-3: bounce off bottom so scattered aliens don't
+                        # silently pass through the player zone / barriers
+                        a.y = BARRIER_Y - 100
+                        a.scatter_vy = -abs(a.scatter_vy)
+            else:
+                last_alien_mode = (len(self.aliens) == 1
+                                   and not self.boss and not self.dive_bombers)
+                self.alien_dir, self.alien_speed = self.movement_pattern.update(
+                    self.aliens, dt, self.alien_speed, self.alien_dir,
+                    last_alien_mode)
             for a in self.aliens:
-                a.x += adx
                 if a.hit_flash > 0:
                     a.hit_flash = max(0.0, a.hit_flash - dt)
-            min_x = min(a.x for a in self.aliens)
-            max_x = max(a.x for a in self.aliens)
-            if max_x > WIDTH - 35 or min_x < 35:
-                self.alien_dir *= -1
-                for a in self.aliens:
-                    a.y += self.current_alien_drop
-                self.alien_speed = min(self.alien_speed + 5, 340)
+                # Hard ceiling: aliens must never descend into the barrier zone
+                a.base_y = min(a.base_y, BARRIER_Y - 100)
+                a.y      = min(a.y,      BARRIER_Y - 100)
+
+        # ── Cull aliens that fell off the bottom of the screen ────────────
+        # Safety net: silently remove any alien that exits the play area.
+        # No player penalty — the movement-pattern bug (B-1) that caused this
+        # has been fixed; this guard remains as a defensive measure only.
+        if self.aliens:
+            self.aliens = [a for a in self.aliens if a.y <= HEIGHT + 30]
 
         # ── Enemy shooting (bottom-row only) ──────────────────────────────
         if self.aliens:
             self.enemy_shoot_timer -= dt
             if self.enemy_shoot_timer <= 0:
-                col_bottoms: dict[int, Alien] = {}
-                for a in self.aliens:
-                    col_key = round(a.x / ALIEN_X_SPACING)
-                    if col_key not in col_bottoms or a.y > col_bottoms[col_key].y:
-                        col_bottoms[col_key] = a
-                if col_bottoms:
-                    shooter = random.choice(list(col_bottoms.values()))
+                landed = [a for a in self.aliens if a.entry_progress >= 1.0]
+                if isinstance(self.movement_pattern, OrbitalRing):
+                    # Orbital: any of the bottom-half aliens can shoot
+                    if landed:
+                        mid_y = sum(a.y for a in landed) / len(landed)
+                        shooters = [a for a in landed if a.y >= mid_y]
+                        shooter = random.choice(shooters) if shooters else random.choice(landed)
+                    else:
+                        shooter = None
+                elif isinstance(self.movement_pattern, SerpentChain):
+                    # Serpent: the chain segment currently lowest on screen shoots
+                    shooter = max(landed, key=lambda a: a.y) if landed else None
+                else:
+                    col_bottoms: dict[int, Alien] = {}
+                    for a in landed:
+                        col_key = a.grid_col
+                        if col_key not in col_bottoms or a.y > col_bottoms[col_key].y:
+                            col_bottoms[col_key] = a
+                    shooter = random.choice(list(col_bottoms.values())) if col_bottoms else None
+                if shooter:
                     aim     = min(0.35, max(0.0, (self.wave - 10) * 0.018))
                     raw_dx  = self.player_x - shooter.x
                     dist    = max(1.0, abs(raw_dx))
@@ -995,7 +1086,8 @@ class Game:
                     self._try_achievement("UFO Hunter")
 
         # ── Dive bomber spawn (wave 2+) ───────────────────────────────────
-        if self.wave >= 2 and self.aliens and not self.dive_bombers:
+        entering = self.movement_pattern and self.movement_pattern.is_entering()
+        if self.wave >= 2 and self.aliens and not self.dive_bombers and not entering:
             self.dive_timer -= dt
             if self.dive_timer <= 0:
                 idx   = random.randint(0, len(self.aliens) - 1)
@@ -1012,9 +1104,23 @@ class Game:
             if diver.alive:
                 alive_divers.append(diver)
             elif diver.returned:
+                # Use current formation base_y rather than stale dive-capture
+                # value, so the alien rejoins where the formation actually is.
+                from si_movement import RollingPincer
+                if isinstance(self.movement_pattern, RollingPincer) and self.aliens:
+                    # Snap to median base_y of same-column aliens if possible
+                    col_peers = [a for a in self.aliens if a.grid_col == diver.grid_col]
+                    rejoined_base_y = (sum(a.base_y for a in col_peers) / len(col_peers)
+                                       if col_peers else diver.base_y)
+                else:
+                    rejoined_base_y = diver.base_y
+                # Clamp so a rejoining alien can never appear below the safe zone
+                rejoined_base_y = min(rejoined_base_y, HEIGHT - 300)
                 self.aliens.append(Alien(
-                    x=diver.start_x, y=diver.start_y, colour=diver.colour,
+                    x=diver.start_x, y=rejoined_base_y, colour=diver.colour,
                     hp=min(3, 1 + (self.wave - 1) // 10),
+                    grid_col=diver.grid_col, grid_row=diver.grid_row,
+                    base_x=diver.base_x, base_y=rejoined_base_y,
                 ))
         self.dive_bombers = alive_divers
 
@@ -1023,6 +1129,14 @@ class Game:
                 self._spawn_explosion(diver.x, diver.y, diver.colour, count=14)
                 diver.alive = False
                 self._player_hit()
+
+        # ── Galaga divers update ───────────────────────────────────────────
+        alive_galaga: list[GalagaDiver] = []
+        for diver in self.galaga_divers:
+            diver.update(dt)
+            if diver.alive:
+                alive_galaga.append(diver)
+        self.galaga_divers = alive_galaga
 
         # ── Combo timer ───────────────────────────────────────────────────
         self.combo_timer = max(0.0, self.combo_timer - dt)
@@ -1037,6 +1151,37 @@ class Game:
         frag_to_spawn:  list[tuple[float, float]] = []
 
         frag_lvl = 1 if self._has_upgrade("frag") else 0
+
+        # ── Player bullets vs Galaga divers ───────────────────────────────
+        for bi, b in enumerate(self.bullets):
+            if bi in bullets_hit:
+                continue
+            for diver in self.galaga_divers:
+                if not diver.alive:
+                    continue
+                if abs(b.x - diver.x) < 30 and abs(b.y - diver.y) < 28:
+                    bullets_hit.add(bi)
+                    diver.alive = False
+                    self.score += 50
+                    self._add_shake(4, 0.12)
+                    self.sfx.play("explode")
+                    for _ in range(20):
+                        self.particles.append(Particle(
+                            diver.x, diver.y,
+                            random.choice([diver.colour, ORANGE, YELLOW]),
+                            speed=random.uniform(100, 300),
+                            size=random.uniform(2, 5), life=0.5,
+                        ))
+                    break
+
+        # ── Galaga diver vs player collision ──────────────────────────────
+        for diver in self.galaga_divers:
+            if (diver.alive
+                    and abs(diver.x - self.player_x) < 36
+                    and abs(diver.y - self.player_y) < 36):
+                self._spawn_explosion(diver.x, diver.y, diver.colour, count=14)
+                diver.alive = False
+                self._player_hit()
 
         for bi, b in enumerate(self.bullets):
             for ai, a in enumerate(self.aliens):
@@ -1065,8 +1210,18 @@ class Game:
                                 size=2, life=0.25,
                             ))
 
-        for ai in sorted(aliens_killed, reverse=True):
-            a = self.aliens[ai]
+        # Pre-collect alien objects BEFORE the loop.
+        # The galaga trigger (and future hooks) can remove extra aliens
+        # mid-loop, invalidating any remaining indices from aliens_killed.
+        # Snapshotting by object reference makes every subsequent lookup safe.
+        _killed_snapshot = [
+            (ai, self.aliens[ai])
+            for ai in sorted(aliens_killed, reverse=True)
+            if ai < len(self.aliens)
+        ]
+        for ai, a in _killed_snapshot:
+            if a not in self.aliens:
+                continue  # already removed by a previous iteration's side-effect
             self.combo_count  += 1
             self.combo_timer   = COMBO_WINDOW
             self.combo_multiplier = min(5, 1 + self.combo_count // 2)
@@ -1074,6 +1229,28 @@ class Game:
             self.score += pts
             self._check_life_milestones()
             self.wave_kills += 1
+
+            # ── Galaga pair dive trigger ──────────────────────────────────────
+            self.galaga_kill_counter += 1
+            entering_now = self.movement_pattern and self.movement_pattern.is_entering()
+            if (self.galaga_kill_counter % 8 == 0
+                    and len(self.aliens) >= 4
+                    and self.boss is None
+                    and not self.galaga_divers
+                    and not entering_now):       # FIX-5: no dives during entry animation
+                max_row = max(al.grid_row for al in self.aliens)
+                # FIX-1: exclude 'a' (already being killed this frame) from candidates
+                candidates = sorted(
+                    [al for al in self.aliens if al.grid_row == max_row and al is not a],
+                    key=lambda al: al.x
+                )
+                pair = candidates[:2] if len(candidates) >= 2 else candidates
+                for k, target in enumerate(pair):
+                    side = -1 if k == 0 else 1
+                    self.galaga_divers.append(
+                        GalagaDiver(target, self.player_x, self.player_y, side))
+                    self.aliens.remove(target)
+                self.sfx.play("dive")
 
             # ── Multi-kill callout ────────────────────────────────────────────
             if self.combo_count == 2:
@@ -1116,7 +1293,17 @@ class Game:
                     ComboPopup(a.x, a.y, self.combo_multiplier, self.font_med))
             if random.random() < self.powerup_drop_chance:
                 self.powerups.append(PowerUp(a.x, a.y))
-            self.aliens.pop(ai)
+            # Always remove by object identity — the galaga trigger (and any
+            # other mid-loop mutation) may have shifted the original index.
+            if a in self.aliens:
+                ai = self.aliens.index(a)
+                self.aliens.pop(ai)
+            # else: already gone — skip the hook too
+            else:
+                ai = 0  # safe fallback; hook won't fire
+            if self.movement_pattern:
+                if hasattr(self.movement_pattern, "on_alien_killed"):
+                    self.movement_pattern.on_alien_killed(ai, self.aliens)
             self._frenzy_kill()
             if self.combo_multiplier >= 5:
                 self._try_achievement("Combo Star")
@@ -1128,6 +1315,21 @@ class Game:
                 self.combo_popups.append(ComboPopup(
                     WIDTH // 2, HEIGHT // 2 - 60, 0, self.font_lv,
                     text="LAST  ONE!"))
+
+            # ── Last-stand scatter trigger ────────────────────────────────────
+            if (not self.last_stand_active
+                    and not self.boss
+                    and self.aliens
+                    and len(self.aliens) <= max(1, 50 // 4)):
+                self.last_stand_active = True
+                for a in self.aliens:
+                    angle = random.uniform(0, 2 * math.pi)
+                    spd   = random.uniform(180, 320)
+                    a.scatter_vx = math.cos(angle) * spd
+                    a.scatter_vy = math.sin(angle) * spd
+                self.combo_popups.append(ComboPopup(
+                    WIDTH // 2, HEIGHT // 2 - 80, 0, self.font_lv,
+                    text="SCATTER!"))
 
         for fx, fy in frag_to_spawn:
             for angle_deg in (-22, 22):
@@ -1218,6 +1420,12 @@ class Game:
                         self._add_shake(16, 0.7)
                         self.sfx.play("bomb")
                         self.boss = None
+                        # Give remaining drones (SwarmQueen) a movement pattern
+                        if self.aliens and not self.movement_pattern:
+                            from si_movement import ClassicMarch
+                            self.movement_pattern = ClassicMarch(
+                                self.current_sector, self.wave,
+                                self.current_alien_drop)
                         self._try_achievement("Boss Slayer")
                     break
 
@@ -1259,10 +1467,17 @@ class Game:
             self.invincible_timer -= dt
 
         # ── Alien invasion check ──────────────────────────────────────────
-        if self.aliens:
-            max_alien_y = max(a.y for a in self.aliens)
+        # Use base_y (stable grid position) not y, so sine/accordion
+        # oscillations don't trigger false invasions on the downswing.
+        landed = [a for a in self.aliens if a.entry_progress >= 1.0]
+        if landed:
+            max_alien_y = max(a.base_y for a in landed)
             if max_alien_y >= self.player_y - 25:
                 self._player_hit()
+                # Prevent rapid re-triggering: invasion hits need a full
+                # respawn window, not just the 0.01 s set by _player_hit().
+                if self.invincible_timer < 1.5:
+                    self.invincible_timer = 1.5
 
         # ── Frenzy banner timer ───────────────────────────────────────────
         if self.frenzy_banner_timer > 0:
@@ -1303,7 +1518,7 @@ class Game:
             self.continue_available = True
 
         # ── Wave clear ────────────────────────────────────────────────────
-        if not self.aliens and not self.dive_bombers and self.boss is None:
+        if not self.aliens and not self.dive_bombers and not self.galaga_divers and self.boss is None:
             if not self.wave_damage_taken:
                 self._try_achievement("Untouchable")
             if self.shots_fired > 0 and self.shots_hit / self.shots_fired >= 0.9:
@@ -1652,10 +1867,24 @@ class Game:
                 col = tuple(max(0, c - 120) for c in a.colour)  # type: ignore[assignment]
             else:
                 col = a.colour
-            draw_fn(self.screen, int(a.x) + ox, int(a.y) + oy, col,
-                    tier=a.sprite_tier)
+            if a.is_anchor:
+                # Pulsing glow for anchor alien
+                t_a = pygame.time.get_ticks() / 1000.0
+                glow_a = int(40 + 25 * math.sin(t_a * 5))
+                glow_surf = pygame.Surface((60, 60), pygame.SRCALPHA)
+                pygame.draw.circle(glow_surf, (*GOLD[:3], glow_a), (30, 30), 28)
+                self.screen.blit(glow_surf, (int(a.x) + ox - 30,
+                                             int(a.y) + oy - 30))
+                draw_fn(self.screen, int(a.x) + ox, int(a.y) + oy, col,
+                        1.4, tier=a.sprite_tier)
+            else:
+                draw_fn(self.screen, int(a.x) + ox, int(a.y) + oy, col,
+                        tier=a.sprite_tier)
 
         for diver in self.dive_bombers:
+            diver.draw(self.screen, offset)
+
+        for diver in self.galaga_divers:
             diver.draw(self.screen, offset)
 
         if self.boss and self.boss.alive:
@@ -1733,6 +1962,33 @@ class Game:
         # ── Sector transition banner ──────────────────────────────────────────
         if self.sector_transition_timer > 0:
             self._draw_sector_transition()
+
+        # ── Predator lock-on bar ──────────────────────────────────────────────
+        lock_prog = getattr(self.movement_pattern, "lock_on_progress", None)
+        if lock_prog is not None:
+            bar_x, bar_y, bar_w, bar_h = 1550, 18, 280, 22
+            # Background track
+            pygame.draw.rect(self.screen, (60, 20, 20),
+                             (bar_x, bar_y, bar_w, bar_h), border_radius=4)
+            # Fill (orange → hot-pink as bar approaches full)
+            fill_w = int(bar_w * lock_prog)
+            r = 255
+            g = int(136 * (1.0 - lock_prog))
+            b = int(lock_prog * 120)
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, (r, g, b),
+                                 (bar_x, bar_y, fill_w, bar_h), border_radius=4)
+            # Border
+            pygame.draw.rect(self.screen, (180, 80, 0),
+                             (bar_x, bar_y, bar_w, bar_h), 2, border_radius=4)
+            # Label
+            lbl = self.font_sm.render("LOCK-ON", True, (255, 180, 60))
+            self.screen.blit(lbl, (bar_x, bar_y + bar_h + 2))
+            # Flash "SURGE!" when bar is full
+            if lock_prog >= 1.0 and int(self.time * 6) % 2 == 0:
+                surge_txt = self.font_med.render("SURGE!", True, (255, 50, 50))
+                sr = surge_txt.get_rect(centerx=bar_x + bar_w // 2, y=bar_y - 28)
+                self.screen.blit(surge_txt, sr)
 
         self._draw_hud()
         self._draw_frenzy_overlay()

@@ -80,8 +80,8 @@ ALIEN_START_SPEED          = 140
 ALIEN_DROP                 = 32
 ALIEN_COLS, ALIEN_ROWS     = 10, 5
 ALIEN_ROWS_MAX             = 9
-ALIEN_X_START, ALIEN_Y_START   = 330, 140
-ALIEN_X_SPACING, ALIEN_Y_SPACING = 140, 72
+ALIEN_X_START, ALIEN_Y_START   = 510, 140
+ALIEN_X_SPACING, ALIEN_Y_SPACING = 100, 72
 
 # ── Enemy bullets ─────────────────────────────────────────────────────────────
 ENEMY_BULLET_SPEED   = 450
@@ -120,8 +120,8 @@ BARRIER_BLOCK_W = 14
 BARRIER_BLOCK_H = 10
 
 # ── Dive bombers ──────────────────────────────────────────────────────────────
-DIVE_INTERVAL_MIN = 14.0
-DIVE_INTERVAL_MAX = 28.0
+DIVE_INTERVAL_MIN = 8.0
+DIVE_INTERVAL_MAX = 16.0
 DIVE_SPEED        = 520
 
 # ── Boss ──────────────────────────────────────────────────────────────────────
@@ -199,9 +199,79 @@ SECTOR_DATA: list[dict] = [
     {"name": "SECTOR  III", "subtitle": "Asteroid Belt", "bg": (14,  11,   8),  "star_tint": (210, 180, 140)},
     {"name": "SECTOR  IV",  "subtitle": "Solar Flare",   "bg": (28,  14,   4),  "star_tint": (255, 240, 180)},
     {"name": "SECTOR  V",   "subtitle": "Deep Anomaly",  "bg": ( 4,   4,   6),  "star_tint": (180, 255, 255)},
+    {"name": "SECTOR  VI",  "subtitle": "Event Horizon", "bg": ( 6,   2,  18),  "star_tint": (220, 180, 255)},
 ]
 SECTOR_TRANSITION_DURATION = 4.0   # seconds the banner stays on screen
 SECTOR_BG_LERP_SPEED       = 0.8   # fraction per second (exponential lerp)
+
+# ── Movement patterns ────────────────────────────────────────────────────────
+# Sinusoidal Sweep (Sector II)
+SINE_AMPLITUDE    = 90       # pixels of vertical oscillation
+SINE_FREQ         = 2.0      # oscillations per second
+SINE_PHASE_OFFSET = 0.7      # radians of phase delay between rows
+
+# Wave Entry
+ENTRY_DURATION    = 1.5      # seconds for an alien to fly into position
+ENTRY_SQUAD_DELAY = 0.3      # seconds between squadron groups
+
+# Accordion Pulse (Sector III)
+ACCORDION_FREQ    = 1.2      # pulses per second
+ACCORDION_RANGE   = 55       # max pixels per unit of column distance
+
+# Rolling Column + Pincer (Sector IV)
+ROLL_WAVE_AMPLITUDE = 38     # pixels of sinusoidal Y wave height per column
+ROLL_WAVE_FREQ      = 0.9    # wave cycles per second
+ROLL_BASE_SPEED   = 8        # retained for import compatibility — no longer drives drift
+ROLL_EDGE_BONUS   = 1.5      # retained for import compatibility
+PINCER_SPREAD     = 80       # max horizontal separation in pixels
+PINCER_TRIGGER_Y  = 96       # pixels descended (via edge bounces) before split activates
+
+# Orbital Ring (Sector V — kept for import compatibility)
+ORBIT_RX          = 400      # ellipse X radius
+ORBIT_RY          = 260      # ellipse Y radius
+ORBIT_SPEED       = 0.5      # radians per second
+ORBIT_CENTER_Y    = 350      # center Y of orbit
+ORBIT_DRIFT_SPEED = 60       # horizontal drift speed of orbit center
+
+# ── Predator Lock-On (Sector IV) ─────────────────────────────────────────────
+PREDATOR_STALK_DURATION  = 8.0   # seconds for lock-on bar to fill
+PREDATOR_SURGE_DURATION  = 2.0   # seconds for downward surge
+PREDATOR_SURGE_DROP      = 380   # pixels descended during surge
+PREDATOR_RETREAT_SPEED   = 220   # pixels per second on return
+PREDATOR_ABORT_THRESHOLD = 0.40  # surge aborts if alive_frac falls below this
+PREDATOR_MARCH_DROP      = 32    # pixels down on each edge-bounce (= ALIEN_DROP)
+
+# ── Serpent Chain (Sector V) ──────────────────────────────────────────────────
+SERPENT_CENTER_X     = 960    # horizontal centre of Lissajous (screen midpoint)
+SERPENT_CENTER_Y     = 500    # vertical centre of curve
+SERPENT_AMP_X        = 500    # horizontal amplitude (pixels)
+SERPENT_AMP_Y        = 280    # vertical amplitude   (pixels)
+SERPENT_FREQ_X       = 0.18   # horizontal oscillations per second
+SERPENT_FREQ_Y       = 0.29   # vertical oscillations per second (irrational ratio)
+SERPENT_PHASE_Y      = 0.785  # vertical phase offset (π/4 radians)
+SERPENT_CHAIN_DELAY  = 0.15   # seconds of delay between consecutive aliens
+SERPENT_HISTORY_SIZE = 900    # ring buffer capacity (15 s @ 60 fps)
+SERPENT_MIN_ALIENS   = 3      # minimum aliens; below this falls back to scatter
+
+# Sector-to-pattern mapping
+SECTOR_MOVEMENT: dict[int, str] = {
+    0: "classic",            # Sector I:   Deep Space      — familiar on-ramp
+    1: "sinusoidal",         # Sector II:  Nebula Field    — flowing wave
+    2: "accordion",          # Sector III: Asteroid Belt   — expanding pulse
+    3: "predator",           # Sector IV:  Solar Flare     — lock-on surge
+    4: "serpent",            # Sector V:   Deep Anomaly    — Lissajous chain
+    5: "orbital",            # Sector VI:  Event Horizon   — ring formation
+}
+
+# Entry formation style per sector
+SECTOR_ENTRY_STYLE: dict[int, str | None] = {
+    0: None,                 # Sector I:   instant appear (gentle start)
+    1: "row_sweep",          # Sector II:  alternating row sweep
+    2: "column_cascade",     # Sector III: column-by-column drop
+    3: "pinch_sides",        # Sector IV:  pinch from both sides
+    4: "diagonal_slash",     # Sector V:   diagonal slash entry
+    5: "diagonal_slash",     # Sector VI:  dramatic slash entry for the ring
+}
 
 # ── Boss title cards ──────────────────────────────────────────────────────────
 # Keyed by the class name returned by type(boss).__name__
@@ -211,3 +281,9 @@ BOSS_TITLES: dict[str, tuple[str, str]] = {
     "SwarmQueen":  ("THE  SWARM  QUEEN", "She never fights alone."),
     "Phantom":     ("THE  PHANTOM",      "You can't hit what you can't see."),
 }
+
+# ── Pressure Pulse ────────────────────────────────────────────────────────────
+PRESSURE_PULSE_INTERVAL = 20.0   # seconds between pulses within a wave
+PRESSURE_PULSE_DROP     = 24     # extra pixels the formation drops on pulse (halved — 48 was too aggressive)
+PRESSURE_PULSE_BOOST    = 2.0    # enemy fire-rate multiplier during pulse
+PRESSURE_PULSE_DURATION = 5.0    # seconds the fire-rate boost lasts
