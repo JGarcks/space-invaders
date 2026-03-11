@@ -51,10 +51,11 @@ BULLET_SPEED = 1000
 ALIEN_START_SPEED = 140
 ALIEN_DROP = 32
 ALIEN_COLS, ALIEN_ROWS = 10, 5
+ALIEN_ROWS_MAX = 9          # cap — reached at wave 33, adds 80 extra aliens vs wave 1
 ALIEN_X_START, ALIEN_Y_START = 330, 140
 ALIEN_X_SPACING, ALIEN_Y_SPACING = 140, 72
-BASE_SHOOT_COOLDOWN = 0.20
-RAPID_SHOOT_COOLDOWN = 0.08
+BASE_SHOOT_COOLDOWN = 0.15
+RAPID_SHOOT_COOLDOWN = 0.07
 COMBO_WINDOW = 1.5
 POWERUP_FALL_SPEED = 200
 POWERUP_DURATION = 5.0
@@ -87,6 +88,43 @@ DIVE_SPEED = 520
 # ── Boss constants ────────────────────────────────────────────────────────────
 # IMPROVEMENT 6: Boss wave every 5th level
 BOSS_WAVE_INTERVAL = 5
+
+# ── Wingman Drone constants ────────────────────────────────────────────────────
+DRONE_ORBIT_RADIUS = 55
+DRONE_ORBIT_SPEED  = 2.5   # radians per second
+DRONE_FIRE_COOLDOWN = 0.45 # base cooldown
+
+# ── Continue constants ─────────────────────────────────────────────────────────
+CONTINUE_SCORE_THRESHOLD = 50000   # score needed to earn a continue
+CONTINUE_WAVE_PENALTY    = 0.5     # restart at 50% of current wave
+
+# ── Frenzy system ─────────────────────────────────────────────────────────────
+# Thresholds = consecutive kills without being hit (resets on hit or wave clear).
+# Tier is KEPT on wave clear so good players carry momentum wave-to-wave.
+# Getting hit drops one tier. 50 aliens/wave → MAX at 45 is achievable but hard.
+FRENZY_TIERS = [
+    {"threshold": 10, "name": "FRENZY!",      "colour": ORANGE,        "fire_mult": 0.67},
+    {"threshold": 25, "name": "FRENZY  II!",  "colour": (255, 120, 0), "fire_mult": 0.50},
+    {"threshold": 45, "name": "MAX  FRENZY!", "colour": HOT_PINK,      "fire_mult": 0.40},
+]
+FRENZY_BANNER_DURATION = 2.2
+
+# ── Temporary upgrade pool (awarded after boss fights, last until next boss) ───
+UPGRADE_DURATION_WAVES = 5   # how many waves an upgrade stays active
+UPGRADE_POOL = [
+    {"id": "pierce", "name": "Bullet Pierce",
+     "desc": ["Bullets pass through", "2 additional aliens"], "colour": CYAN},
+    {"id": "regen",  "name": "Barrier Regen",
+     "desc": ["Barriers restore 1 block", "at the start of each wave"], "colour": LIME},
+    {"id": "burst",  "name": "Burst Core",
+     "desc": ["Every 4th shot fires", "a 3-bullet burst"], "colour": HOT_PINK},
+    {"id": "speed",  "name": "Speed Boost",
+     "desc": ["Move 25% faster", "for 5 waves"], "colour": YELLOW},
+    {"id": "frag",   "name": "Frag Shots",
+     "desc": ["Bullets split into 2", "on alien impact"], "colour": ORANGE},
+    {"id": "extralife", "name": "Extra Life", "desc": ["Gain one additional", "life right now"], "colour": (100, 255, 100)},
+    {"id": "drone", "name": "Wingman Drone", "desc": ["A drone orbits you", "firing alongside"], "colour": (80, 200, 255)},
+]
 
 # ── Difficulty settings ───────────────────────────────────────────────────────
 DIFFICULTIES = ["Easy", "Normal", "Hard"]
@@ -260,6 +298,7 @@ def _make_extra_life_sfx(volume=0.30):
     sound = pygame.mixer.Sound(buffer=buf)
     sound.set_volume(volume)
     return sound
+
 
 def _make_ambient_loop(volume=0.06):
     """
@@ -590,6 +629,11 @@ class Barrier:
     @property
     def alive(self):
         return any(b[2] > 0 for b in self.blocks)
+
+    def regen_blocks(self):
+        """Fully restore all barrier blocks to max health (regen upgrade)."""
+        for b in self.blocks:
+            b[2] = 3
 
     def draw(self, surface, offset):
         ox, oy = offset
@@ -941,8 +985,8 @@ class Game:
         self.combo_count = 0
         self.combo_timer = 0
         self.combo_multiplier = 1
-        self.active_powerup = None
-        self.powerup_timer = 0
+        # Stacking timed power-ups: kind → remaining seconds
+        self.active_powerups = {}
         self.has_shield = False
         self.invincible_timer = 0
         self.alien_anim_timer = 0
@@ -973,6 +1017,48 @@ class Game:
         self.wave_kills = 0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
 
+        # Temporary upgrades (awarded after boss fights, expire after N waves)
+        self.active_upgrades = {}      # id → waves remaining
+        # Upgrade picker state
+        self.upgrade_choices = []      # list of 3 upgrade dicts
+        self.upgrade_cursor  = 1       # 0/1/2
+        # Burst beam: counts player shots; every 3rd triggers a 3-bullet burst
+        self.burst_shot_count = 0
+        # Frenzy system
+        self.frenzy_streak = 0         # consecutive kills without being hit
+        self.frenzy_tier   = 0         # 0=none, 1/2/3 = tier
+        self.frenzy_banner_timer = 0.0 # countdown for tier-up announcement
+        self.frenzy_banner_tier  = 0   # which tier is being announced
+
+        # STAGE 1a: Procedural sounds (no extra initialization needed, will use SFX_ globals)
+        self._low_life_timer = 0.0     # heartbeat timer for low life warning
+
+        # STAGE 1c: Wave clear flash
+        self.wave_clear_flash = 0.0
+
+        # STAGE 2a: Wingman drone
+        self.drone_angle = 0.0
+        self.drone_active = False
+        self.drone_fire_timer = 0.0
+
+        # STAGE 2b: Score-based continues
+        self.continue_available = False
+        self.continue_used = False
+
+        # STAGE 3a: Endless frenzy scaling
+        self.frenzy_beyond_kills = 0
+        self.frenzy_beyond_level = 0
+
+        # STAGE 3b: Boss attack patterns
+        self.boss_phase = 0
+        self.boss_phase_timer = 3.0
+        self.boss_spread_cooldown = 0.0
+
+        # STAGE 3c: Boss explosion cinematic
+        self.boss_cinematic_timer = 0.0
+        self.boss_cinematic_x = 0.0
+        self.boss_cinematic_y = 0.0
+
         self._spawn_wave()
 
     def _make_barriers(self):
@@ -996,24 +1082,29 @@ class Game:
             SFX_BOSS.play()
         else:
             y_offset = min((self.wave - 1) * 8, 100)
-            rows = min(7, ALIEN_ROWS + (self.wave - 1) // 8)
+            rows = min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
+            alien_hp = min(3, 1 + (self.wave - 1) // 10)   # 1 HP waves 1-10, 2 HP 11-20, 3 HP 21+
             for row in range(rows):
                 for col in range(ALIEN_COLS):
                     ax = ALIEN_X_START + col * ALIEN_X_SPACING
                     ay = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset
                     colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
-                    self.aliens.append({"x": ax, "y": ay, "colour": colour})
+                    self.aliens.append({"x": ax, "y": ay, "colour": colour,
+                                        "hp": alien_hp, "hit_flash": 0.0})
 
         self.alien_dir = 1
-        self.alien_speed = ALIEN_START_SPEED * (1 + 0.05 * (self.wave - 1)) * diff["speed"]
+        # Speed scales slowly; hard cap keeps it physically playable at high waves
+        raw_speed = ALIEN_START_SPEED * (1 + 0.015 * (self.wave - 1)) * diff["speed"]
+        self.alien_speed = min(raw_speed, 340)
         self.enemy_shoot_interval = max(
             0.4, (ENEMY_SHOOT_INTERVAL - 0.15 * (self.wave - 1)) / diff["fire_rate"]
         )
         self.enemy_bullet_speed = min(
             650, (ENEMY_BULLET_SPEED + 18 * (self.wave - 1)) * diff["bullet_speed"]
         )
-        self.powerup_drop_chance = diff["powerup"]
-        self.current_alien_drop = min(50, ALIEN_DROP + self.wave)
+        # Drop rate rises gradually with wave — later waves feel more generous
+        self.powerup_drop_chance = min(diff["powerup"] + self.wave * 0.003, 0.22)
+        self.current_alien_drop = min(40, ALIEN_DROP + self.wave // 3)
         self.enemy_shoot_timer = self.enemy_shoot_interval
         self.enemy_bullets = []
         self.wave_damage_taken = False
@@ -1025,6 +1116,19 @@ class Game:
         # IMPROVEMENT 7: Per-wave tracking
         self.wave_kills = 0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
+
+        # Regen upgrade: restore barrier blocks at wave start
+        if self.active_upgrades.get("regen", 0) > 0:
+            for barrier in self.barriers:
+                barrier.regen_blocks()
+
+    def _play(self, snd):
+        """Play a sound safely."""
+        if snd:
+            try:
+                snd.play()
+            except Exception:
+                pass
 
     def _add_shake(self, intensity, duration):
         self.shake_intensity = intensity
@@ -1050,18 +1154,35 @@ class Game:
                                            life=random.uniform(0.15, 0.35)))
 
     def _trigger_bomb(self):
-        """Detonate a bomb: clear all aliens and enemy bullets."""
+        """Detonate a bomb: clear bottom row of aliens and enemy bullets."""
         pts = len(self.aliens) * 8
-        for a in self.aliens:
-            self._spawn_explosion(a["x"], a["y"], a["colour"], count=8)
+
+        # STAGE 1f: Enhanced bomb - wipes entire bottom row of aliens
+        if self.aliens:
+            max_y = max(a["y"] for a in self.aliens)
+            # Remove aliens within ~30px of max_y (bottom row)
+            cleared_aliens = [a for a in self.aliens if a["y"] >= max_y - 30]
+            self.aliens = [a for a in self.aliens if a["y"] < max_y - 30]
+
+            # Spawn explosion particles at the cleared row
+            for _ in range(20):
+                self.particles.append(Particle(
+                    random.uniform(100, WIDTH - 100),
+                    max_y,
+                    random.choice([ORANGE, YELLOW, HOT_PINK]),
+                    speed=random.uniform(60, 160),
+                    angle=random.uniform(math.pi * 1.1, math.pi * 1.9),
+                    size=random.randint(3, 6),
+                    life=random.uniform(0.4, 0.8)
+                ))
+
         for diver in self.dive_bombers:
             self._spawn_explosion(diver.x, diver.y, diver.colour, count=8)
-        self.aliens = []
         self.dive_bombers = []
         self.enemy_bullets = []
         self.score += pts
         self._check_life_milestones()
-        self._add_shake(12, 0.5)
+        self._add_shake(6, 0.3) if 'snd_explosion' not in dir(self) else self._add_shake(6, 0.3)
         SFX_BOMB.play()
         self.bomb_flash_timer = 0.18
         self._try_achievement("Nuclear Option")
@@ -1077,6 +1198,55 @@ class Game:
             self.combo_popups.append(ComboPopup(
                 WIDTH // 2, HEIGHT // 2, 0, self.font_med, text="+1 LIFE!"
             ))
+
+    def _has_powerup(self, kind):
+        return self.active_powerups.get(kind, 0) > 0
+
+    def _has_upgrade(self, uid):
+        return self.active_upgrades.get(uid, 0) > 0
+
+    def _frenzy_kill(self):
+        """Call after every player kill. Increments streak and upgrades frenzy tier."""
+        self.frenzy_streak += 1
+        new_tier = 0
+        for i, td in enumerate(FRENZY_TIERS):
+            if self.frenzy_streak >= td["threshold"]:
+                new_tier = i + 1
+        if new_tier > self.frenzy_tier:
+            self.frenzy_tier = new_tier
+            self.frenzy_banner_timer = FRENZY_BANNER_DURATION
+            self.frenzy_banner_tier  = new_tier
+            self._add_shake(5, 0.2)
+
+        # STAGE 3a: Endless frenzy scaling
+        if self.frenzy_tier == 3:
+            self.frenzy_beyond_kills += 1
+            new_beyond_level = self.frenzy_beyond_kills // 15
+            if new_beyond_level > self.frenzy_beyond_level:
+                self.frenzy_beyond_level = new_beyond_level
+                self._add_shake(3, 0.15)
+                SFX_ACHIEVE.play()
+
+    def _apply_upgrade(self, upgrade_id):
+        # Re-picking an upgrade adds another full duration on top of what's left
+        if upgrade_id == "extralife":
+            self.lives = min(self.lives + 1, 5)  # cap at 5
+            return  # don't add to active_upgrades
+        current = self.active_upgrades.get(upgrade_id, 0)
+        self.active_upgrades[upgrade_id] = current + UPGRADE_DURATION_WAVES
+
+    def _fire_burst(self, base_x, base_y, pierce_remaining):
+        """Fires 3 vertically-staggered burst bullets (HOT_PINK). Called on every 3rd shot."""
+        for offset_y in (0, -14, -28):
+            self.bullets.append({
+                "x": float(base_x),
+                "y": float(base_y + offset_y),
+                "vx": 0.0,
+                "vy": -BULLET_SPEED,
+                "colour": HOT_PINK,
+                "pierce_remaining": pierce_remaining,
+                "is_frag": False,
+            })
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     def run(self):
@@ -1094,8 +1264,9 @@ class Game:
                     else:
                         self._handle_keydown(event)
 
+            star_speed_mult = 1.0 + 0.5 * getattr(self, "frenzy_tier", 0)
             for star in self.stars:
-                star.update(dt)
+                star.update(dt * star_speed_mult)
 
             if self.state == "TITLE":
                 self._update_title(dt)
@@ -1107,6 +1278,8 @@ class Game:
                 self._update_gameover(dt)
             elif self.state == "WAVE_SUMMARY":
                 self._update_wave_summary(dt)
+            elif self.state == "UPGRADE_PICK":
+                self._update_upgrade_pick(dt)
 
             self._draw()
 
@@ -1154,6 +1327,20 @@ class Game:
             if event.key in (pygame.K_SPACE, pygame.K_RETURN):
                 self.wave_summary_timer = 0.0
 
+        elif self.state == "UPGRADE_PICK":
+            if event.key in (pygame.K_LEFT, pygame.K_a):
+                self.upgrade_cursor = (self.upgrade_cursor - 1) % 3
+            elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                self.upgrade_cursor = (self.upgrade_cursor + 1) % 3
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                chosen = self.upgrade_choices[self.upgrade_cursor]
+                self._apply_upgrade(chosen["id"])
+                # Transition: compute summary, spawn next wave, show summary
+                d = self.wave_summary_data
+                self.wave_summary_timer = 3.5
+                self._spawn_wave()
+                self.state = "WAVE_SUMMARY"
+
         elif self.state == "GAME_OVER":
             if self.entering_name:
                 if event.key == pygame.K_UP:
@@ -1181,7 +1368,15 @@ class Game:
                     self._unlock_ships()
                     self.entering_name = False
             else:
-                if event.key == pygame.K_r:
+                # STAGE 2b: Continue option
+                if event.key == pygame.K_c and self.continue_available and not self.continue_used:
+                    self.continue_used = True
+                    self.lives = 1
+                    self.wave = max(1, int(self.wave * CONTINUE_WAVE_PENALTY))
+                    self.state = "PLAYING"
+                    self._spawn_wave()
+                    MUSIC_CHANNEL.play(MUSIC_LOOP, loops=-1)
+                elif event.key == pygame.K_r:
                     self.state = "TITLE"
 
     # ── Title ─────────────────────────────────────────────────────────────────
@@ -1193,6 +1388,7 @@ class Game:
     # IMPROVEMENT 7: Show stats between waves
     def _update_wave_summary(self, dt):
         self.wave_summary_timer -= dt
+        self.wave_clear_flash = max(0.0, self.wave_clear_flash - dt * 2.0)
         self.particles   = [p for p in self.particles if p.update(dt)]
         self.combo_popups = [c for c in self.combo_popups if c.update(dt)]
         alive_banners = []
@@ -1206,39 +1402,105 @@ class Game:
             self.state = "PLAYING"
             MUSIC_CHANNEL.unpause()
 
+    # ── Upgrade pick (shown after boss defeat) ────────────────────────────────
+    def _update_upgrade_pick(self, dt):
+        # Particles/banners keep animating in background
+        self.particles    = [p for p in self.particles if p.update(dt)]
+        self.combo_popups = [c for c in self.combo_popups if c.update(dt)]
+        alive_banners = []
+        for i, b in enumerate(self.banners):
+            if b.update(dt, i):
+                alive_banners.append(b)
+        self.banners = alive_banners
+
     # ── Playing ───────────────────────────────────────────────────────────────
     def _update_playing(self, dt):
         # Bomb flash countdown (visual only)
         if self.bomb_flash_timer > 0:
             self.bomb_flash_timer -= dt
 
+        # STAGE 1c: Wave clear flash decay
+        self.wave_clear_flash = max(0.0, self.wave_clear_flash - dt * 2.0)
+
+        # Low-life heartbeat warning sound
+        if self.lives == 1:
+            self._low_life_timer -= dt
+            if self._low_life_timer <= 0:
+                SFX_PLAYER_HIT.play()
+                self._low_life_timer = 1.4
+        else:
+            self._low_life_timer = 0.0
+
         keys = pygame.key.get_pressed()
 
-        # ── Player movement ───────────────────────────────────────────────
+        # ── Player movement (Speed upgrade applied) ───────────────────────
+        speed_mult = 1.25 if self._has_upgrade("speed") else 1.0
         dx = 0
+        moving = False
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            dx -= PLAYER_SPEED * dt
+            dx -= PLAYER_SPEED * speed_mult * dt
+            moving = True
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            dx += PLAYER_SPEED * dt
+            dx += PLAYER_SPEED * speed_mult * dt
+            moving = True
         self.player_x = max(35, min(WIDTH - 35, self.player_x + dx))
 
+        # STAGE 1d: Exhaust trail when moving
+        if moving:
+            self.particles.append(Particle(
+                self.player_x + random.uniform(-6, 6),
+                self.player_y + 18,
+                (0, 150, 255),
+                speed=random.uniform(40, 80),
+                angle=random.uniform(math.pi * 0.35, math.pi * 0.65),
+                size=random.randint(2, 4),
+                life=random.uniform(0.15, 0.35)
+            ))
+
         # ── Player shooting ───────────────────────────────────────────────
+        has_rapid   = self._has_powerup("rapid")
+        has_spread  = self._has_powerup("spread")
+        has_burst   = self._has_upgrade("burst")
+        pierce_lvl  = 2 if self._has_upgrade("pierce") else 0
+
+        # Frenzy fire rate: each tier makes shooting faster
+        frenzy_mult = FRENZY_TIERS[self.frenzy_tier - 1]["fire_mult"] if self.frenzy_tier > 0 else 1.0
+        # STAGE 3a: Endless frenzy scaling - speed up even more past tier 3
+        if self.frenzy_tier == 3 and self.frenzy_beyond_level > 0:
+            frenzy_mult = frenzy_mult * (0.95 ** self.frenzy_beyond_level)
+            frenzy_mult = max(0.15, frenzy_mult)  # hard floor at 15% of base
+        # Bullet colour escalates with frenzy tier
+        bullet_col  = FRENZY_TIERS[self.frenzy_tier - 1]["colour"] if self.frenzy_tier > 0 else YELLOW
+
         self.shoot_cooldown = max(0, self.shoot_cooldown - dt)
         if keys[pygame.K_SPACE] and self.shoot_cooldown <= 0:
-            cooldown = RAPID_SHOOT_COOLDOWN if self.active_powerup == "rapid" else BASE_SHOOT_COOLDOWN
-            self.shoot_cooldown = cooldown
+            base_cd = RAPID_SHOOT_COOLDOWN if has_rapid else BASE_SHOOT_COOLDOWN
+            self.shoot_cooldown = base_cd * frenzy_mult
             SFX_PEW.play()
             self.shots_fired += 1
+            by = self.player_y - 40
 
-            if self.active_powerup == "spread":
+            if has_spread:
                 for angle in [-0.15, 0, 0.15]:
                     vx = math.sin(angle) * BULLET_SPEED
                     vy = -math.cos(angle) * BULLET_SPEED
-                    self.bullets.append({"x": self.player_x, "y": self.player_y - 40,
-                                         "vx": vx, "vy": vy})
+                    self.bullets.append({"x": float(self.player_x), "y": float(by),
+                                         "vx": vx, "vy": vy,
+                                         "colour": bullet_col,
+                                         "pierce_remaining": pierce_lvl,
+                                         "is_frag": False})
             else:
-                self.bullets.append({"x": self.player_x, "y": self.player_y - 40,
-                                     "vx": 0, "vy": -BULLET_SPEED})
+                self.bullets.append({"x": float(self.player_x), "y": float(by),
+                                     "vx": 0.0, "vy": -BULLET_SPEED,
+                                     "colour": bullet_col,
+                                     "pierce_remaining": pierce_lvl,
+                                     "is_frag": False})
+
+            # Burst upgrade: every 3rd shot fires an extra 3-bullet burst
+            if has_burst:
+                self.burst_shot_count += 1
+                if self.burst_shot_count % 3 == 0:
+                    self._fire_burst(self.player_x, by, pierce_lvl)
 
             for _ in range(3):
                 self.particles.append(Particle(
@@ -1253,6 +1515,10 @@ class Game:
         for b in self.bullets:
             b["x"] += b["vx"] * dt
             b["y"] += b["vy"] * dt
+            if "frag_life" in b:
+                b["frag_life"] -= dt
+                if b["frag_life"] <= 0:
+                    continue
             if 0 < b["y"] < HEIGHT and 0 < b["x"] < WIDTH:
                 alive_bullets.append(b)
         self.bullets = alive_bullets
@@ -1276,9 +1542,31 @@ class Game:
         if barrier_blocked:
             self.bullets = [b for i, b in enumerate(self.bullets) if i not in barrier_blocked]
 
+        # STAGE 2a: Wingman drone ──────────────────────────────────────────────────
+        self.drone_active = self._has_upgrade("drone")
+        if self.drone_active:
+            self.drone_angle += DRONE_ORBIT_SPEED * dt
+            # Drone fires independently
+            frenzy_mult = FRENZY_TIERS[self.frenzy_tier - 1]["fire_mult"] if self.frenzy_tier > 0 else 1.0
+            drone_cooldown = DRONE_FIRE_COOLDOWN * frenzy_mult
+            self.drone_fire_timer -= dt
+            if self.drone_fire_timer <= 0 and self.aliens:
+                self.drone_fire_timer = drone_cooldown
+                dx = math.cos(self.drone_angle) * DRONE_ORBIT_RADIUS
+                dy = math.sin(self.drone_angle) * DRONE_ORBIT_RADIUS
+                drone_x = self.player_x + dx
+                drone_y = self.player_y + dy
+                self.bullets.append({
+                    "x": float(drone_x), "y": float(drone_y),
+                    "vx": 0.0, "vy": -BULLET_SPEED,
+                    "colour": CYAN, "pierce_remaining": 0, "is_frag": False,
+                    "is_drone": True
+                })
+                SFX_PEW.play()
+
         # ── IMPROVEMENT 4: Alien animation speed tied to remaining count ──
         # Fewer aliens → faster animation (classic Space Invaders tension)
-        total_aliens_this_wave = ALIEN_COLS * min(7, ALIEN_ROWS + (self.wave - 1) // 8)
+        total_aliens_this_wave = ALIEN_COLS * min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
         if self.aliens:
             anim_threshold = max(0.08, 0.5 * (len(self.aliens) / max(1, total_aliens_this_wave)))
         else:
@@ -1293,13 +1581,15 @@ class Game:
             adx = self.alien_dir * self.alien_speed * dt
             for a in self.aliens:
                 a["x"] += adx
+                if a.get("hit_flash", 0) > 0:
+                    a["hit_flash"] = max(0.0, a["hit_flash"] - dt)
             min_x = min(a["x"] for a in self.aliens)
             max_x = max(a["x"] for a in self.aliens)
             if max_x > WIDTH - 35 or min_x < 35:
                 self.alien_dir *= -1
                 for a in self.aliens:
                     a["y"] += self.current_alien_drop
-                self.alien_speed += 5
+                self.alien_speed = min(self.alien_speed + 5, 340)
 
         # ── IMPROVEMENT 3: Only bottom-row aliens shoot ───────────────────
         # Build a set of the lowest alien in each column
@@ -1314,10 +1604,15 @@ class Game:
                         col_bottoms[col_key] = a
                 if col_bottoms:
                     shooter = random.choice(list(col_bottoms.values()))
+                    # Aim-assist: gentle horizontal drift toward player, grows with wave
+                    aim = min(0.35, max(0.0, (self.wave - 10) * 0.018))
+                    raw_dx = self.player_x - shooter["x"]
+                    dist = max(1.0, abs(raw_dx))
+                    vx = (raw_dx / dist) * self.enemy_bullet_speed * aim
                     self.enemy_bullets.append({
                         "x": shooter["x"],
                         "y": shooter["y"] + 20,
-                        "vx": 0,
+                        "vx": vx,
                         "vy": self.enemy_bullet_speed
                     })
                     SFX_ENEMY_SHOOT.play()
@@ -1455,7 +1750,9 @@ class Game:
                 self.aliens.append({
                     "x": diver.start_x,
                     "y": diver.start_y,
-                    "colour": diver.colour
+                    "colour": diver.colour,
+                    "hp": min(3, 1 + (self.wave - 1) // 10),
+                    "hit_flash": 0.0,
                 })
         self.dive_bombers = alive_divers
 
@@ -1473,17 +1770,47 @@ class Game:
             self.combo_multiplier = 1
 
         # ── Player bullets vs aliens ──────────────────────────────────────
-        bullets_hit = set()
-        aliens_hit  = set()
+        bullets_hit        = set()   # bullets that are used up
+        aliens_touched     = set()   # aliens hit this frame (prevents double-hit)
+        aliens_killed      = set()   # aliens with hp <= 0 to be removed
+        frag_to_spawn      = []      # kill positions for frag bullets
+
+        frag_lvl = 1 if self._has_upgrade("frag") else 0
+
         for bi, b in enumerate(self.bullets):
             for ai, a in enumerate(self.aliens):
-                if ai in aliens_hit:
+                if ai in aliens_touched:
                     continue
                 if abs(b["x"] - a["x"]) < 28 and abs(b["y"] - a["y"]) < 24:
-                    bullets_hit.add(bi)
-                    aliens_hit.add(ai)
+                    aliens_touched.add(ai)
+                    a["hp"] = a.get("hp", 1) - 1
+                    self.shots_hit += 1
 
-        for ai in sorted(aliens_hit, reverse=True):
+                    # Bullet: pierce passes through, otherwise consumed
+                    if b.get("pierce_remaining", 0) > 0:
+                        b["pierce_remaining"] -= 1
+                    else:
+                        bullets_hit.add(bi)
+
+                    if a["hp"] <= 0:
+                        aliens_killed.add(ai)
+                        # Frag: non-frag kills spawn 2 angled fragments
+                        if frag_lvl > 0 and not b.get("is_frag", False):
+                            frag_to_spawn.append((a["x"], a["y"]))
+                    else:
+                        # Hit but survived — flash white briefly
+                        a["hit_flash"] = 0.12
+                        # STAGE 1b: Spark particles on non-kill hit
+                        for _ in range(5):
+                            self.particles.append(Particle(
+                                a["x"], a["y"],
+                                WHITE,
+                                speed=random.uniform(60, 140),
+                                size=2,
+                                life=0.25
+                            ))
+
+        for ai in sorted(aliens_killed, reverse=True):
             a = self.aliens[ai]
             self.combo_count += 1
             self.combo_timer = COMBO_WINDOW
@@ -1491,9 +1818,26 @@ class Game:
             pts = 10 * self.combo_multiplier
             self.score += pts
             self._check_life_milestones()
-            self.shots_hit += 1
             self.wave_kills += 1
-            self._spawn_explosion(a["x"], a["y"], a["colour"])
+            # STAGE 2e: Alien death variety - scale based on wave
+            if self.wave <= 10:
+                death_count = 6
+                death_size_max = 4
+                death_colours = [a["colour"], WHITE]
+            elif self.wave <= 20:
+                death_count = 10
+                death_size_max = 5
+                death_colours = [a["colour"], WHITE, ORANGE]
+            else:
+                death_count = 15
+                death_size_max = 7
+                death_colours = [a["colour"], ORANGE, RED, YELLOW, HOT_PINK]
+
+            for _ in range(death_count):
+                self.particles.append(Particle(a["x"], a["y"], random.choice(death_colours),
+                                               speed=random.uniform(120, 350),
+                                               size=random.uniform(3, death_size_max),
+                                               life=random.uniform(0.3, 0.7)))
             self._add_shake(3, 0.1)
             SFX_EXPLODE.play()
             if self.combo_multiplier > 1:
@@ -1502,8 +1846,24 @@ class Game:
             if random.random() < self.powerup_drop_chance:
                 self.powerups.append(PowerUp(a["x"], a["y"]))
             self.aliens.pop(ai)
+            self._frenzy_kill()
             if self.combo_multiplier >= 5:
                 self._try_achievement("Combo Star")
+
+        # Spawn frag bullets (two angled shards per kill)
+        for fx, fy in frag_to_spawn:
+            for angle_deg in (-22, 22):
+                rad = math.radians(angle_deg)
+                spd = BULLET_SPEED * 0.85
+                self.bullets.append({
+                    "x": float(fx), "y": float(fy),
+                    "vx": math.sin(rad) * spd,
+                    "vy": -math.cos(rad) * spd,
+                    "colour": ORANGE,
+                    "is_frag": True,
+                    "frag_life": 0.55,
+                    "pierce_remaining": 0,
+                })
 
         # ── Player bullets vs dive bombers ────────────────────────────────
         for bi, b in enumerate(self.bullets):
@@ -1515,8 +1875,16 @@ class Game:
                 if abs(b["x"] - diver.x) < 30 and abs(b["y"] - diver.y) < 28:
                     bullets_hit.add(bi)
                     diver.alive = False
-                    self._spawn_explosion(diver.x, diver.y, diver.colour, count=18)
-                    self._add_shake(4, 0.12)
+                    # STAGE 2c: Enhanced bonus ship explosion
+                    for _ in range(30):
+                        self.particles.append(Particle(
+                            diver.x, diver.y,
+                            random.choice([ORANGE, YELLOW, HOT_PINK, WHITE, RED]),
+                            speed=random.uniform(40, 200),
+                            size=random.randint(3, 7),
+                            life=random.uniform(0.4, 1.0)
+                        ))
+                    self._add_shake(8, 0.4)
                     SFX_EXPLODE.play()
                     pts = 50 * self.combo_multiplier
                     self.score += pts
@@ -1525,6 +1893,7 @@ class Game:
                     self.combo_timer = COMBO_WINDOW
                     self.combo_multiplier = min(5, 1 + self.combo_count // 2)
                     self.wave_kills += 1
+                    self._frenzy_kill()
                     break
 
         # ── IMPROVEMENT 6: Player bullets vs boss ─────────────────────────
@@ -1546,6 +1915,10 @@ class Game:
                             int(self.boss.x), int(self.boss.y), 0,
                             self.font_med, text=f"+{pts}!"
                         ))
+                        # STAGE 3c: Boss explosion cinematic instead of immediate destruction
+                        self.boss_cinematic_timer = 2.0
+                        self.boss_cinematic_x = self.boss.x
+                        self.boss_cinematic_y = self.boss.y
                         # Big multi-stage explosion
                         for _ in range(3):
                             ox_ = random.randint(-60, 60)
@@ -1561,6 +1934,7 @@ class Game:
                                 int(self.boss.y)
                             ))
                         self._add_shake(16, 0.7)
+                        SFX_BOMB.play()
                         self.boss = None
                         self._try_achievement("Boss Slayer")
                     break
@@ -1569,7 +1943,7 @@ class Game:
             if bi < len(self.bullets):
                 self.bullets.pop(bi)
 
-        if aliens_hit and self.score > 0:
+        if aliens_killed and self.score > 0:
             self._try_achievement("First Blood")
 
         # ── Power-ups ─────────────────────────────────────────────────────
@@ -1586,18 +1960,20 @@ class Game:
                         self._trigger_bomb()
                         self._try_achievement("Nuclear Option")
                     else:
-                        self.active_powerup = pu.kind
-                        self.powerup_timer = POWERUP_DURATION
+                        # Stacking: each pick-up refreshes/extends that powerup's timer
+                        self.active_powerups[pu.kind] = POWERUP_DURATION
                     if self.powerups_collected_wave >= 3:
                         self._try_achievement("Power Collector")
                 else:
                     alive_powerups.append(pu)
         self.powerups = alive_powerups
 
-        if self.active_powerup:
-            self.powerup_timer -= dt
-            if self.powerup_timer <= 0:
-                self.active_powerup = None
+        # Tick down all stacking timed power-ups; remove expired ones
+        expired = [k for k, t in self.active_powerups.items() if t - dt <= 0]
+        for k in expired:
+            del self.active_powerups[k]
+        for k in list(self.active_powerups):
+            self.active_powerups[k] -= dt
 
         if self.invincible_timer > 0:
             self.invincible_timer -= dt
@@ -1607,6 +1983,30 @@ class Game:
             max_alien_y = max(a["y"] for a in self.aliens)
             if max_alien_y >= self.player_y - 25:
                 self._player_hit()
+
+        # ── Frenzy banner timer ────────────────────────────────────────────
+        if self.frenzy_banner_timer > 0:
+            self.frenzy_banner_timer = max(0.0, self.frenzy_banner_timer - dt)
+
+        # STAGE 3c: Boss explosion cinematic
+        if self.boss_cinematic_timer > 0:
+            self.boss_cinematic_timer -= dt
+            # Spawn random explosion bursts
+            if random.random() < 0.4:
+                ox_b = random.uniform(-50, 50)
+                oy_b = random.uniform(-30, 30)
+                for _ in range(8):
+                    self.particles.append(Particle(
+                        self.boss_cinematic_x + ox_b,
+                        self.boss_cinematic_y + oy_b,
+                        random.choice([ORANGE, YELLOW, RED, WHITE, HOT_PINK]),
+                        speed=random.uniform(50, 180),
+                        size=random.randint(4, 9),
+                        life=random.uniform(0.5, 1.2)
+                    ))
+            if random.random() < 0.15:
+                SFX_EXPLODE.play()
+                self._add_shake(5, 0.2)
 
         # ── Particles / popups / banners ──────────────────────────────────
         self.particles    = [p for p in self.particles if p.update(dt)]
@@ -1620,6 +2020,10 @@ class Game:
         if self.shake_timer > 0:
             self.shake_timer -= dt
 
+        # STAGE 2b: Check for continue eligibility
+        if self.score >= CONTINUE_SCORE_THRESHOLD and not self.continue_used:
+            self.continue_available = True
+
         # ── Wave clear ────────────────────────────────────────────────────
         # IMPROVEMENT 6: Also wait for boss to be defeated
         if not self.aliens and not self.dive_bombers and self.boss is None:
@@ -1627,6 +2031,22 @@ class Game:
                 self._try_achievement("Untouchable")
             if self.shots_fired > 0 and self.shots_hit / self.shots_fired >= 0.9:
                 self._try_achievement("Sharp Shooter")
+
+            # STAGE 1c: Wave clear flash
+            self.wave_clear_flash = 0.5
+            SFX_LEVEL_UP.play()
+
+            # Reset streak on wave clear but KEEP the tier —
+            # good players carry frenzy momentum, getting hit still costs them
+            self.frenzy_streak = 0
+            self.frenzy_banner_timer = 0.0
+
+            # Tick temporary upgrades at wave END (so the cleared wave gets full benefit)
+            for k in list(self.active_upgrades):
+                self.active_upgrades[k] -= 1
+            expired = [k for k, v in self.active_upgrades.items() if v <= 0]
+            for k in expired:
+                del self.active_upgrades[k]
 
             cleared_wave = self.wave
             self.wave += 1
@@ -1652,9 +2072,18 @@ class Game:
                 "perfect_bonus": perfect_bonus,
                 "acc_bonus": acc_bonus,
             }
-            self.wave_summary_timer = 3.5
-            self.state = "WAVE_SUMMARY"
             MUSIC_CHANNEL.pause()
+
+            # Boss wave → upgrade picker before summary
+            if cleared_wave % BOSS_WAVE_INTERVAL == 0:
+                available = list(UPGRADE_POOL)
+                random.shuffle(available)
+                self.upgrade_choices  = available[:3]
+                self.upgrade_cursor   = 1
+                self.state = "UPGRADE_PICK"
+            else:
+                self.wave_summary_timer = 3.5
+                self.state = "WAVE_SUMMARY"
 
     def _player_hit(self):
         # IMPROVEMENT 5: Set invincible immediately to prevent multi-hit in same frame
@@ -1675,6 +2104,20 @@ class Game:
         self._spawn_explosion(self.player_x, self.player_y, self._get_ship_colour(), count=20)
         self._add_shake(6, 0.2)
         SFX_DEATH.play()
+
+        # Frenzy: drop one tier on hit (not a full reset)
+        if self.frenzy_tier > 0:
+            self.frenzy_tier -= 1
+            if self.frenzy_tier > 0:
+                self.frenzy_streak = FRENZY_TIERS[self.frenzy_tier - 1]["threshold"]
+            else:
+                self.frenzy_streak = 0
+        else:
+            self.frenzy_streak = 0
+        self.frenzy_banner_timer = 0.0  # clear any active announcement
+        # STAGE 3a: Reset beyond progression when dropping from tier 3
+        self.frenzy_beyond_kills = 0
+        self.frenzy_beyond_level = 0
 
         if self.lives <= 0:
             self.state = "GAME_OVER"
@@ -1727,6 +2170,9 @@ class Game:
         elif self.state == "WAVE_SUMMARY":
             self._draw_playing(offset)
             self._draw_wave_summary()
+        elif self.state == "UPGRADE_PICK":
+            self._draw_playing(offset)
+            self._draw_upgrade_pick()
 
         for p in self.particles:
             p.draw(self.screen, offset)
@@ -1861,10 +2307,41 @@ class Game:
             draw_ship(self.screen, int(self.player_x) + ox, int(self.player_y) + oy,
                       self._get_ship_colour())
 
+        # STAGE 2a: Draw drone ─────────────────────────────────────────────
+        if self.drone_active:
+            dx = math.cos(self.drone_angle) * DRONE_ORBIT_RADIUS
+            dy = math.sin(self.drone_angle) * DRONE_ORBIT_RADIUS
+            drone_x = int(self.player_x + dx)
+            drone_y = int(self.player_y + dy)
+            # Draw drone as a small glowing diamond
+            pts = [
+                (drone_x + ox, drone_y + oy - 10),
+                (drone_x + ox + 8, drone_y + oy),
+                (drone_x + ox, drone_y + oy + 10),
+                (drone_x + ox - 8, drone_y + oy),
+            ]
+            pygame.draw.polygon(self.screen, CYAN, pts)
+            pygame.draw.polygon(self.screen, WHITE, pts, 1)
+            # Glow
+            glow = pygame.Surface((30, 30), pygame.SRCALPHA)
+            t = pygame.time.get_ticks() / 1000.0
+            ga = int(30 + 20 * math.sin(t * 4))
+            pygame.draw.circle(glow, (*CYAN[:3], ga), (15, 15), 13)
+            self.screen.blit(glow, (drone_x + ox - 15, drone_y + oy - 15))
+
         # ── Aliens ───────────────────────────────────────────────────────
         draw_fn = draw_alien_a if self.alien_frame == 0 else draw_alien_b
         for a in self.aliens:
-            draw_fn(self.screen, int(a["x"]) + ox, int(a["y"]) + oy, a["colour"])
+            # Flash white on hit, dim on 2nd/3rd HP to show damage state
+            if a.get("hit_flash", 0) > 0:
+                col = WHITE
+            elif a.get("hp", 1) == 2:
+                col = tuple(max(0, c - 60) for c in a["colour"])   # slightly dimmed
+            elif a.get("hp", 1) == 1 and a.get("hp", 1) < min(3, 1 + (self.wave-1)//10):
+                col = tuple(max(0, c - 120) for c in a["colour"])  # noticeably dimmed
+            else:
+                col = a["colour"]
+            draw_fn(self.screen, int(a["x"]) + ox, int(a["y"]) + oy, col)
 
         # ── Dive bombers ──────────────────────────────────────────────────
         for diver in self.dive_bombers:
@@ -1881,14 +2358,20 @@ class Game:
         # ── Player bullets ────────────────────────────────────────────────
         for b in self.bullets:
             bx, by = int(b["x"]) + ox, int(b["y"]) + oy
-            glow = pygame.Surface((16, 36), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*YELLOW, 30), (0, 0, 16, 36), border_radius=8)
-            self.screen.blit(glow, (bx - 8, by - 10))
-            trail = pygame.Surface((12, 30), pygame.SRCALPHA)
-            pygame.draw.rect(trail, (*YELLOW, 50), (0, 0, 12, 30), border_radius=6)
-            self.screen.blit(trail, (bx - 6, by - 6))
-            pygame.draw.rect(self.screen, YELLOW, (bx - 3, by - 10, 6, 20), border_radius=3)
-            pygame.draw.rect(self.screen, WHITE, (bx - 1, by - 8, 2, 12), border_radius=1)
+            col = b.get("colour", YELLOW)
+            if b.get("is_frag"):
+                # Frag bullets: smaller orange shards
+                pygame.draw.rect(self.screen, col, (bx - 3, by - 7, 6, 14), border_radius=3)
+                pygame.draw.rect(self.screen, WHITE, (bx - 1, by - 5, 2, 8), border_radius=1)
+            else:
+                glow = pygame.Surface((16, 36), pygame.SRCALPHA)
+                pygame.draw.rect(glow, (*col[:3], 30), (0, 0, 16, 36), border_radius=8)
+                self.screen.blit(glow, (bx - 8, by - 10))
+                trail = pygame.Surface((12, 30), pygame.SRCALPHA)
+                pygame.draw.rect(trail, (*col[:3], 50), (0, 0, 12, 30), border_radius=6)
+                self.screen.blit(trail, (bx - 6, by - 6))
+                pygame.draw.rect(self.screen, col, (bx - 3, by - 10, 6, 20), border_radius=3)
+                pygame.draw.rect(self.screen, WHITE, (bx - 1, by - 8, 2, 12), border_radius=1)
 
         # ── Enemy bullets ─────────────────────────────────────────────────
         for eb in self.enemy_bullets:
@@ -1913,7 +2396,125 @@ class Game:
         for cp in self.combo_popups:
             cp.draw(self.screen, offset)
 
+        # STAGE 1c: Wave clear flash overlay
+        if self.wave_clear_flash > 0:
+            alpha = int(180 * self.wave_clear_flash)
+            flash = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            flash.fill((0, 220, 255, alpha))
+            self.screen.blit(flash, (0, 0))
+
+        # STAGE 3c: Boss destruction cinematic text
+        if self.boss_cinematic_timer > 0:
+            bt = self.font_med.render("BOSS  DESTROYED!", True, ORANGE)
+            self.screen.blit(bt, (WIDTH // 2 - bt.get_width() // 2, HEIGHT // 2 - 40))
+
         self._draw_hud()
+        self._draw_frenzy_overlay()
+
+    def _draw_frenzy_overlay(self):
+        """Screen-edge glow, player halo, streak counter, progress bar and tier banner."""
+        if self.frenzy_tier == 0 and self.frenzy_streak == 0 and self.frenzy_banner_timer == 0:
+            return
+
+        t = pygame.time.get_ticks() / 1000.0
+        tier = self.frenzy_tier
+
+        # ── Screen-edge pulsing glow ──────────────────────────────────────
+        if tier > 0:
+            td   = FRENZY_TIERS[tier - 1]
+            col  = td["colour"]
+            pulse = 0.5 + 0.5 * math.sin(t * (3 + tier * 1.5))
+            # STAGE 2d: Frenzy visual escalation - scale with tier
+            bw   = 6 + tier * 4 + int(tier * 8 * abs(math.sin(t * 2)))  # increased width with pulse
+            alpha = min(255, int(70 + 110 * pulse + tier * 30))  # scale alpha with tier, clamped
+            glow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (*col[:3], alpha), (0,          0,           WIDTH, bw))
+            pygame.draw.rect(glow, (*col[:3], alpha), (0,          HEIGHT - bw, WIDTH, bw))
+            pygame.draw.rect(glow, (*col[:3], alpha), (0,          0,           bw,    HEIGHT))
+            pygame.draw.rect(glow, (*col[:3], alpha), (WIDTH - bw, 0,           bw,    HEIGHT))
+            self.screen.blit(glow, (0, 0))
+
+            # STAGE 2d: Tier 3 vignette pulse
+            if tier == 3:
+                pulse_pulse = abs(math.sin(t * 3))
+                vignette = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                pygame.draw.ellipse(vignette, (255, 0, 100, int(15 * pulse_pulse)),
+                                    (WIDTH//4, HEIGHT//4, WIDTH//2, HEIGHT//2))
+                self.screen.blit(vignette, (0, 0))
+
+        # ── Player ship halo ──────────────────────────────────────────────
+        if tier > 0:
+            hcol = FRENZY_TIERS[tier - 1]["colour"]
+            hpulse = int(40 + 40 * math.sin(t * 6))
+            halo = pygame.Surface((80, 80), pygame.SRCALPHA)
+            pygame.draw.circle(halo, (*hcol[:3], hpulse), (40, 40), 36 + tier * 2)
+            self.screen.blit(halo, (int(self.player_x) - 40, int(self.player_y) - 40))
+
+        # ── Streak counter + progress bar (centre-bottom) ─────────────────
+        streak_col = FRENZY_TIERS[tier - 1]["colour"] if tier > 0 else CYAN
+        sy_base = HEIGHT - 130
+
+        streak_surf = self.font_med.render(str(self.frenzy_streak), True, streak_col)
+        self.screen.blit(streak_surf,
+                         (WIDTH // 2 - streak_surf.get_width() // 2, sy_base))
+
+        bar_y = sy_base + streak_surf.get_height() + 6
+        bar_w = 220
+
+        if tier < 3:
+            next_td   = FRENZY_TIERS[tier]
+            prev_thr  = FRENZY_TIERS[tier - 1]["threshold"] if tier > 0 else 0
+            progress  = (self.frenzy_streak - prev_thr) / max(1, next_td["threshold"] - prev_thr)
+            progress  = max(0.0, min(1.0, progress))
+            ncol      = next_td["colour"]
+            # Background track
+            pygame.draw.rect(self.screen, (40, 40, 40),
+                             (WIDTH // 2 - bar_w // 2, bar_y, bar_w, 8), border_radius=4)
+            # Fill
+            pygame.draw.rect(self.screen, streak_col,
+                             (WIDTH // 2 - bar_w // 2, bar_y, int(bar_w * progress), 8),
+                             border_radius=4)
+            # Label
+            lbl = self.font_xs.render(f"→ {next_td['name']}", True, ncol)
+            self.screen.blit(lbl, (WIDTH // 2 - lbl.get_width() // 2, bar_y + 12))
+        else:
+            # MAX FRENZY — pulsing label
+            mp = 0.85 + 0.15 * math.sin(t * 5)
+            lbl = self.font_xs.render("✦ MAX FRENZY ✦", True, HOT_PINK)
+            lw, lh = lbl.get_size()
+            ls = pygame.transform.scale(lbl, (int(lw * mp), int(lh * mp)))
+            self.screen.blit(ls, (WIDTH // 2 - ls.get_width() // 2, bar_y + 4))
+            # STAGE 3a: Show beyond level if applicable
+            if self.frenzy_beyond_level > 0:
+                beyond_txt = self.font_xs.render(
+                    f"✦ MANIAC  +{self.frenzy_beyond_level} ✦", True, HOT_PINK)
+                self.screen.blit(beyond_txt,
+                    (WIDTH // 2 - beyond_txt.get_width() // 2, bar_y + 28))
+
+        # ── Tier-up slam announcement ─────────────────────────────────────
+        if self.frenzy_banner_timer > 0 and self.frenzy_banner_tier > 0:
+            td   = FRENZY_TIERS[self.frenzy_banner_tier - 1]
+            prog = self.frenzy_banner_timer / FRENZY_BANNER_DURATION  # 1→0
+            # Scale: slams in, settles quickly — reduced scale for subtler effect
+            if prog > 0.75:
+                scale = 1.0 + 1.5 * (prog - 0.75) / 0.25
+            else:
+                scale = 1.0
+            # Alpha: full for middle, fades at end
+            alpha = int(255 * min(1.0, prog * 3.5))
+            txt = self.font_med.render(td["name"], True, td["colour"])
+            tw, th = txt.get_size()
+            scaled = pygame.transform.scale(txt, (int(tw * scale), int(th * scale)))
+            scaled.set_alpha(alpha)
+            bx = WIDTH  // 2 - scaled.get_width()  // 2
+            by_ = HEIGHT // 2 - scaled.get_height() // 2 - 80
+            # Shadow for depth
+            shadow = self.font_med.render(td["name"], True, (0, 0, 0))
+            sw, sh_ = shadow.get_size()
+            shadow_s = pygame.transform.scale(shadow, (int(sw * scale), int(sh_ * scale)))
+            shadow_s.set_alpha(alpha // 2)
+            self.screen.blit(shadow_s, (bx + 4, by_ + 4))
+            self.screen.blit(scaled,   (bx, by_))
 
     def _draw_hud(self):
         # Score panel
@@ -1967,19 +2568,48 @@ class Game:
             )
             self.screen.blit(alien_count_txt, (WIDTH - alien_count_txt.get_width() - 16, 70))
 
-        # Powerup timer bar
-        if self.active_powerup and self.powerup_timer > 0:
-            label = POWERUP_LABELS.get(self.active_powerup, "")
-            colour = POWERUP_COLOURS.get(self.active_powerup, WHITE)
-            bar_w = int(350 * (self.powerup_timer / POWERUP_DURATION))
-            pygame.draw.rect(self.screen, (*colour[:3],), (20, 58, bar_w, 14), border_radius=4)
-            pygame.draw.rect(self.screen, colour, (20, 58, 350, 14), 1, border_radius=4)
+        # Stacked powerup timer bars (one row per active powerup)
+        bar_y_start = 58
+        row_h = 18
+        for idx, (kind, remaining) in enumerate(self.active_powerups.items()):
+            bar_y = bar_y_start + idx * row_h
+            label  = POWERUP_LABELS.get(kind, kind.upper())
+            colour = POWERUP_COLOURS.get(kind, WHITE)
+            bar_w  = int(350 * min(remaining / POWERUP_DURATION, 1.0))
+            pygame.draw.rect(self.screen, (*colour[:3], 80), (20, bar_y, 350, 13), border_radius=4)
+            pygame.draw.rect(self.screen, (*colour[:3],),    (20, bar_y, bar_w, 13), border_radius=4)
+            pygame.draw.rect(self.screen, colour,            (20, bar_y, 350, 13), 1, border_radius=4)
             lbl = self.font_xs.render(label, True, colour)
-            self.screen.blit(lbl, (380, 55))
+            self.screen.blit(lbl, (376, bar_y - 1))
 
         if self.has_shield:
+            sh_y = bar_y_start + len(self.active_powerups) * row_h
             sh = self.font_xs.render("SHIELD ACTIVE", True, BLUE)
-            self.screen.blit(sh, (20, 78))
+            self.screen.blit(sh, (20, sh_y))
+
+        # Active upgrade badges (bottom-left strip) — show waves remaining
+        badge_x = 20
+        badge_y = HEIGHT - 34
+        upgrade_badge_info = {
+            "pierce": ("PIERCE", CYAN),
+            "regen":  ("REGEN",  LIME),
+            "burst":  ("BURST",  HOT_PINK),
+            "speed":  ("SPEED",  YELLOW),
+            "frag":   ("FRAG",   ORANGE),
+        }
+        for uid, (label, colour) in upgrade_badge_info.items():
+            waves_left = self.active_upgrades.get(uid, 0)
+            if waves_left == 0:
+                continue
+            badge_str = f"{label} {waves_left}w"
+            badge_surf = self.font_xs.render(badge_str, True, colour)
+            bw = badge_surf.get_width() + 10
+            badge_bg = pygame.Surface((bw, 18), pygame.SRCALPHA)
+            pygame.draw.rect(badge_bg, (*colour[:3], 40), (0, 0, bw, 18), border_radius=4)
+            pygame.draw.rect(badge_bg, (*colour[:3], 160), (0, 0, bw, 18), 1, border_radius=4)
+            self.screen.blit(badge_bg, (badge_x, badge_y))
+            self.screen.blit(badge_surf, (badge_x + 5, badge_y + 1))
+            badge_x += bw + 6
 
         # Combo timer bar
         if self.combo_count > 0 and self.combo_timer > 0:
@@ -2005,6 +2635,84 @@ class Game:
             if needed > 0:
                 life_txt = self.font_xs.render(f"+1 life at {next_ms}", True, DIM_WHITE)
                 self.screen.blit(life_txt, (20, 118))
+
+    def _draw_upgrade_pick(self):
+        """3-card upgrade selection overlay shown after a boss wave."""
+        t = pygame.time.get_ticks() / 1000.0
+
+        # Dim background
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 175))
+        self.screen.blit(overlay, (0, 0))
+
+        # Title
+        title = self.font_big.render("CHOOSE AN UPGRADE", True, GOLD)
+        self.screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
+
+        hint = self.font_xs.render("← → to select   ENTER to confirm", True, DIM_WHITE)
+        self.screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, 172))
+
+        card_w, card_h = 300, 260
+        gap = 40
+        total_w = 3 * card_w + 2 * gap
+        start_x = WIDTH // 2 - total_w // 2
+        card_y   = HEIGHT // 2 - card_h // 2 - 20
+
+        for idx, upg in enumerate(self.upgrade_choices):
+            cx = start_x + idx * (card_w + gap)
+            selected = (idx == self.upgrade_cursor)
+            col = upg["colour"]
+
+            # Card background
+            card = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            bg_alpha = 210 if selected else 130
+            pygame.draw.rect(card, (10, 10, 40, bg_alpha), (0, 0, card_w, card_h), border_radius=14)
+
+            # Border — pulsing gold for selected, dim colour otherwise
+            if selected:
+                pulse = 0.7 + 0.3 * math.sin(t * 5)
+                border_col = (int(255 * pulse), int(200 * pulse), 0, 255)
+                border_w = 3
+            else:
+                border_col = (*col[:3], 100)
+                border_w = 1
+            pygame.draw.rect(card, border_col, (0, 0, card_w, card_h), border_w, border_radius=14)
+            self.screen.blit(card, (cx, card_y))
+
+            # Upgrade name
+            name_surf = self.font_med.render(upg["name"], True, col if not selected else WHITE)
+            self.screen.blit(name_surf, (cx + card_w // 2 - name_surf.get_width() // 2,
+                                         card_y + 28))
+
+            # Colour accent line
+            pygame.draw.rect(self.screen, col, (cx + 20, card_y + 56, card_w - 40, 2))
+
+            # Description lines
+            for li, line in enumerate(upg["desc"]):
+                dl = self.font_xs.render(line, True, (200, 200, 200))
+                self.screen.blit(dl, (cx + card_w // 2 - dl.get_width() // 2,
+                                      card_y + 74 + li * 22))
+
+            # "Xw left" badge if already active
+            waves_left = self.active_upgrades.get(upg["id"], 0)
+            if waves_left > 0:
+                badge_str = f"+{UPGRADE_DURATION_WAVES}w  ({waves_left}w left)"
+                badge = self.font_xs.render(badge_str, True, LIME)
+                badge_bg = pygame.Surface((badge.get_width() + 12, 18), pygame.SRCALPHA)
+                pygame.draw.rect(badge_bg, (0, 180, 0, 60), (0, 0, *badge_bg.get_size()), border_radius=5)
+                pygame.draw.rect(badge_bg, (0, 220, 0, 160), (0, 0, *badge_bg.get_size()), 1, border_radius=5)
+                bx_ = cx + card_w // 2 - badge_bg.get_width() // 2
+                self.screen.blit(badge_bg, (bx_, card_y + card_h - 50))
+                self.screen.blit(badge, (bx_ + 6, card_y + card_h - 49))
+
+            # Arrow indicator on selected card
+            if selected:
+                arrow_pts = [
+                    (cx + card_w // 2, card_y + card_h + 12),
+                    (cx + card_w // 2 - 14, card_y + card_h + 30),
+                    (cx + card_w // 2 + 14, card_y + card_h + 30),
+                ]
+                pygame.draw.polygon(self.screen, GOLD, arrow_pts)
 
     def _draw_paused(self):
         """Semi-transparent overlay shown when game is paused."""
@@ -2116,9 +2824,18 @@ class Game:
             confirm = self.font_sm.render("Type letters or use Up/Down arrows, then ENTER", True, DIM_WHITE)
             self.screen.blit(confirm, (WIDTH // 2 - confirm.get_width() // 2, 670))
         else:
+            # STAGE 2b: Draw continue option if available
+            if self.continue_available and not self.continue_used:
+                ct = self.font_med.render("PRESS  C  TO  CONTINUE  (WAVE {})".format(
+                    max(1, int(self.wave * CONTINUE_WAVE_PENALTY))), True, CYAN)
+                self.screen.blit(ct, (WIDTH // 2 - ct.get_width() // 2, 450))
+                restart_y = 520
+            else:
+                restart_y = 500
+
             restart = self.font_med.render("Press R to return to title", True, WHITE)
             if int(pygame.time.get_ticks() / 500) % 2:
-                self.screen.blit(restart, (WIDTH // 2 - restart.get_width() // 2, 500))
+                self.screen.blit(restart, (WIDTH // 2 - restart.get_width() // 2, restart_y))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
