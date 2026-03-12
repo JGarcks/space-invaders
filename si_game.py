@@ -47,7 +47,8 @@ from si_constants import (
     BONUS_ROUND_INTERVAL, BONUS_ROUND_ENEMIES, BONUS_ROUND_SCORE,
     BONUS_ROUND_PERFECT, BONUS_ROUND_DURATION,
     BONUS_FRAG_RADIUS, BONUS_POWERUP_EVERY,
-    GRAZE_DISTANCE, GRAZE_POINTS, PROXIMITY_KILL_DISTANCE, PROXIMITY_KILL_MULT,
+    GRAZE_DISTANCE, GRAZE_INNER_DISTANCE, GRAZE_POINTS,
+    PROXIMITY_KILL_DISTANCE, PROXIMITY_KILL_MULT,
     POWERUP_WEIGHTS_EARLY, POWERUP_WEIGHTS_LATE, PowerUpKindEx,
     SYNERGY_DEFINITIONS,
     COLOSSUS_TURRET_SCORE,
@@ -90,8 +91,9 @@ class Game:
         self.font_sm  = pygame.font.SysFont("consolas", 26)
         self.font_xs  = pygame.font.SysFont("consolas", 20)
 
-        # Sound manager (lazy — nothing synthesised yet)
+        # Sound manager
         self.sfx = SoundManager()
+        self.sfx.preload_all()
 
         # CRT overlay (pre-baked; zero per-frame cost)
         self.crt_enabled = True
@@ -137,6 +139,10 @@ class Game:
 
         self.difficulty = "Normal"
         self.bomb_flash_timer = 0.0
+        self._bomb_flash_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._frenzy_glow_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._frenzy_vignette_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._frenzy_halo_surf = pygame.Surface((80, 80), pygame.SRCALPHA)
 
         self._init_game()
 
@@ -174,7 +180,7 @@ class Game:
         self.enemy_bullets: list[EnemyBullet] = []
         self.enemy_shoot_timer    = 0.0
         self.enemy_shoot_interval = ENEMY_SHOOT_INTERVAL
-        self._base_shoot_interval = ENEMY_SHOOT_INTERVAL  # FIX-2: initialise base
+        self._base_shoot_interval = ENEMY_SHOOT_INTERVAL
         self.enemy_bullet_speed   = ENEMY_BULLET_SPEED
         self.current_alien_drop   = ALIEN_DROP
         self.powerups:    list[PowerUp]          = []
@@ -209,10 +215,10 @@ class Game:
         self.powerup_drop_chance = DIFFICULTY_SETTINGS[self.difficulty]["powerup"]
 
         self.next_life_milestone_idx = 0
-        self.boss: Mothership | Dreadnought | SwarmQueen | Phantom | None = None
+        self.boss: Mothership | Dreadnought | SwarmQueen | Phantom | Colossus | None = None
 
         self.wave_summary_timer = 0.0
-        self.wave_summary_data: dict = {}
+        self.wave_summary_data: dict[str, object] = {}
         self.wave_kills = 0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
         self.wave_flawless        = True    # True until any hit lands (even vs shield)
@@ -222,7 +228,7 @@ class Game:
         self.konami_active = False
 
         self.active_upgrades: dict[str, int] = {}
-        self.upgrade_choices: list[dict] = []
+        self.upgrade_choices: list[dict[str, object]] = []
         self.upgrade_cursor = 1
         self.burst_shot_count = 0
 
@@ -383,7 +389,7 @@ class Game:
         self.powerup_duration = min(8, 5 + (self.wave - 1) // 20)
         self.current_alien_drop   = min(40, ALIEN_DROP + self.wave // 3)
         self.enemy_shoot_timer    = self.enemy_shoot_interval
-        self._base_shoot_interval = self.enemy_shoot_interval   # FIX-2: store base for pulse restore
+        self._base_shoot_interval = self.enemy_shoot_interval
         self.enemy_bullets        = []
         self.wave_damage_taken    = False
         self.wave_flawless        = True
@@ -1004,11 +1010,23 @@ class Game:
 
         # ── Move player bullets ───────────────────────────────────────────
         homing_active = "homing" in self.active_powerups
+        if homing_active and self.aliens:
+            _alien_positions = [(a.x, a.y, a) for a in self.aliens]
+        else:
+            _alien_positions = []
         alive_bullets: list[Bullet] = []
         for b in self.bullets:
             # Homing: curve toward nearest enemy
-            if homing_active and self.aliens:
-                nearest = min(self.aliens, key=lambda a: math.hypot(a.x - b.x, a.y - b.y))
+            if homing_active and _alien_positions:
+                best_dist_sq = float('inf')
+                nearest = _alien_positions[0][2]
+                for ax, ay, alien_obj in _alien_positions:
+                    dx = ax - b.x
+                    dy = ay - b.y
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq < best_dist_sq:
+                        best_dist_sq = dist_sq
+                        nearest = alien_obj
                 desired = math.atan2(nearest.y - b.y, nearest.x - b.x)
                 current = math.atan2(b.vy, b.vx)
                 diff_a = (desired - current + math.pi) % (2 * math.pi) - math.pi
@@ -1101,7 +1119,7 @@ class Game:
                     text="PRESSURE!"))
         if self.pressure_pulse_active > 0:
             self.pressure_pulse_active -= dt
-            # FIX-2: apply boost against the BASE interval, not the current one
+            # Apply boost against the BASE interval, not the current one
             # so the rate restores correctly once the pulse expires
             self.enemy_shoot_interval = max(
                 0.35,
@@ -1132,7 +1150,7 @@ class Game:
                         a.y = 60
                         a.scatter_vy = abs(a.scatter_vy)
                     elif a.y > BARRIER_Y - 100:
-                        # FIX-3: bounce off bottom so scattered aliens don't
+                        # Bounce off bottom so scattered aliens don't
                         # silently pass through the player zone / barriers
                         a.y = BARRIER_Y - 100
                         a.scatter_vy = -abs(a.scatter_vy)
@@ -1319,7 +1337,7 @@ class Game:
             dx_g = eb.x - self.player_x
             dy_g = eb.y - self.player_y
             dist_g = math.hypot(dx_g, dy_g)
-            if dist_g < GRAZE_DISTANCE and dist_g > 18:  # close but not a hit
+            if dist_g < GRAZE_DISTANCE and dist_g > GRAZE_INNER_DISTANCE:  # close but not a hit
                 self.score += GRAZE_POINTS
                 self.graze_count += 1
                 self.wave_graze_count += 1
@@ -1558,6 +1576,7 @@ class Game:
                                 size=2, life=0.25,
                             ))
 
+        aliens_to_remove: set[int] = set()  # set of id(alien)
         # Pre-collect alien objects BEFORE the loop.
         # The galaga trigger (and future hooks) can remove extra aliens
         # mid-loop, invalidating any remaining indices from aliens_killed.
@@ -1592,9 +1611,9 @@ class Game:
                     and len(self.aliens) >= 4
                     and self.boss is None
                     and not self.galaga_divers
-                    and not entering_now):       # FIX-5: no dives during entry animation
+                    and not entering_now):
                 max_row = max(al.grid_row for al in self.aliens)
-                # FIX-1: exclude 'a' (already being killed this frame) from candidates
+                # Exclude 'a' (already being killed this frame) from candidates
                 candidates = sorted(
                     [al for al in self.aliens if al.grid_row == max_row and al is not a],
                     key=lambda al: al.x
@@ -1604,7 +1623,7 @@ class Game:
                     side = -1 if k == 0 else 1
                     self.galaga_divers.append(
                         GalagaDiver(target, self.player_x, self.player_y, side))
-                    self.aliens.remove(target)
+                    aliens_to_remove.add(id(target))
                 self.sfx.play("dive")
 
             # ── Multi-kill callout ────────────────────────────────────────────
@@ -1649,23 +1668,14 @@ class Game:
             if random.random() < self.powerup_drop_chance:
                 pu_kind = WeightedPowerUp.weighted_random_type(self.wave)
                 self.powerups.append(PowerUp(a.x, a.y, kind=pu_kind))
-            # Always remove by object identity — the galaga trigger (and any
-            # other mid-loop mutation) may have shifted the original index.
-            if a in self.aliens:
-                ai = self.aliens.index(a)
-                self.aliens.pop(ai)
-            # else: already gone — skip the hook too
-            else:
-                ai = 0  # safe fallback; hook won't fire
-            if self.movement_pattern:
-                if hasattr(self.movement_pattern, "on_alien_killed"):
-                    self.movement_pattern.on_alien_killed(ai, self.aliens)
+            aliens_to_remove.add(id(a))
             self._frenzy_kill()
             if self.combo_multiplier >= 5:
                 self._try_achievement("Combo Star")
 
             # ── Last alien detection ──────────────────────────────────────────
-            if (len(self.aliens) == 1 and not self.last_alien_announced
+            _eff_count = sum(1 for al in self.aliens if id(al) not in aliens_to_remove)
+            if (_eff_count == 1 and not self.last_alien_announced
                     and not self.boss and not self.dive_bombers):
                 self.last_alien_announced = True
                 self.combo_popups.append(ComboPopup(
@@ -1675,8 +1685,8 @@ class Game:
             # ── Last-stand scatter trigger ────────────────────────────────────
             if (not self.last_stand_active
                     and not self.boss
-                    and self.aliens
-                    and len(self.aliens) <= max(1, 50 // 4)):
+                    and _eff_count > 0
+                    and _eff_count <= max(1, 50 // 4)):
                 self.last_stand_active = True
                 for a in self.aliens:
                     angle = random.uniform(0, 2 * math.pi)
@@ -1686,6 +1696,22 @@ class Game:
                 self.combo_popups.append(ComboPopup(
                     WIDTH // 2, HEIGHT // 2 - 80, 0, self.font_lv,
                     text="SCATTER!"))
+
+        # ── Deferred alien removal ────────────────────────────────────────
+        if aliens_to_remove:
+            mp = self.movement_pattern
+            has_hook = mp and hasattr(mp, "on_alien_killed")
+            if has_hook:
+                # Remove one-by-one in reverse index order so indices stay
+                # valid and the movement-pattern hook sees the correct state.
+                for i in sorted(
+                    [j for j, al in enumerate(self.aliens) if id(al) in aliens_to_remove],
+                    reverse=True,
+                ):
+                    self.aliens.pop(i)
+                    mp.on_alien_killed(i, self.aliens)
+            else:
+                self.aliens = [a for a in self.aliens if id(a) not in aliens_to_remove]
 
         for fx, fy in frag_to_spawn:
             for angle_deg in (-22, 22):
@@ -2255,9 +2281,8 @@ class Game:
 
         if self.bomb_flash_timer > 0:
             alpha = min(255, int(200 * (self.bomb_flash_timer / 0.18)))
-            flash = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            flash.fill((255, 200, 50, alpha))
-            self.screen.blit(flash, (0, 0))
+            self._bomb_flash_surf.fill((255, 200, 50, alpha))
+            self.screen.blit(self._bomb_flash_surf, (0, 0))
 
         if self.crt_enabled:
             self.screen.blit(self.scanline_surf, (0, 0))
@@ -2601,27 +2626,27 @@ class Game:
             pulse = 0.5 + 0.5 * math.sin(t * (3 + tier * 1.5))
             bw    = 6 + tier * 4 + int(tier * 8 * abs(math.sin(t * 2)))
             alpha = min(255, int(70 + 110 * pulse + tier * 30))
-            glow  = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*col[:3], alpha), (0,          0,           WIDTH, bw))
-            pygame.draw.rect(glow, (*col[:3], alpha), (0,          HEIGHT - bw, WIDTH, bw))
-            pygame.draw.rect(glow, (*col[:3], alpha), (0,          0,           bw,    HEIGHT))
-            pygame.draw.rect(glow, (*col[:3], alpha), (WIDTH - bw, 0,           bw,    HEIGHT))
-            self.screen.blit(glow, (0, 0))
+            self._frenzy_glow_surf.fill((0, 0, 0, 0))
+            pygame.draw.rect(self._frenzy_glow_surf, (*col[:3], alpha), (0,          0,           WIDTH, bw))
+            pygame.draw.rect(self._frenzy_glow_surf, (*col[:3], alpha), (0,          HEIGHT - bw, WIDTH, bw))
+            pygame.draw.rect(self._frenzy_glow_surf, (*col[:3], alpha), (0,          0,           bw,    HEIGHT))
+            pygame.draw.rect(self._frenzy_glow_surf, (*col[:3], alpha), (WIDTH - bw, 0,           bw,    HEIGHT))
+            self.screen.blit(self._frenzy_glow_surf, (0, 0))
 
             if tier == 3:
                 pulse_pulse = abs(math.sin(t * 3))
-                vignette = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-                pygame.draw.ellipse(vignette,
+                self._frenzy_vignette_surf.fill((0, 0, 0, 0))
+                pygame.draw.ellipse(self._frenzy_vignette_surf,
                                     (255, 0, 100, int(15 * pulse_pulse)),
                                     (WIDTH // 4, HEIGHT // 4, WIDTH // 2, HEIGHT // 2))
-                self.screen.blit(vignette, (0, 0))
+                self.screen.blit(self._frenzy_vignette_surf, (0, 0))
 
         if tier > 0:
             hcol   = FRENZY_TIERS[tier - 1]["colour"]
             hpulse = int(40 + 40 * math.sin(t * 6))
-            halo   = pygame.Surface((80, 80), pygame.SRCALPHA)
-            pygame.draw.circle(halo, (*hcol[:3], hpulse), (40, 40), 36 + tier * 2)
-            self.screen.blit(halo, (int(self.player_x) - 40, int(self.player_y) - 40))
+            self._frenzy_halo_surf.fill((0, 0, 0, 0))
+            pygame.draw.circle(self._frenzy_halo_surf, (*hcol[:3], hpulse), (40, 40), 36 + tier * 2)
+            self.screen.blit(self._frenzy_halo_surf, (int(self.player_x) - 40, int(self.player_y) - 40))
 
         streak_col = FRENZY_TIERS[tier - 1]["colour"] if tier > 0 else CYAN
         sy_base    = HEIGHT - 130

@@ -26,6 +26,7 @@ from si_constants import (
     SENTINEL_HP, SENTINEL_SCORE, SENTINEL_SPEED,
     SENTINEL_SHIELD_GAP, SENTINEL_SHIELD_SPEED, SENTINEL_SHIELD_SPEED_P2,
     SENTINEL_SHIELD_RADIUS, SENTINEL_SHOOT_INTERVAL,
+    SENTINEL_SWOOP_DEPTH, SENTINEL_SWOOP_INTERVAL, SENTINEL_DIVE_SPEED_MULT,
     WRAITH_HP, WRAITH_SCORE, WRAITH_TELEPORT_INTERVAL,
     WRAITH_SHIMMER_DURATION, WRAITH_INVULN_DURATION,
     WRAITH_MISSILE_SPEED, WRAITH_MISSILE_TRACKING, WRAITH_MISSILE_LIFETIME,
@@ -34,9 +35,12 @@ from si_constants import (
     LEVIATHAN_SEGMENT_SPACING, LEVIATHAN_SPEED, LEVIATHAN_BOB_AMP,
     LEVIATHAN_BOB_FREQ, LEVIATHAN_SHOOT_INTERVAL, LEVIATHAN_REGROW_TIME,
     LEVIATHAN_HEAD_SCORE, LEVIATHAN_SEGMENT_SCORE,
+    LEVIATHAN_DESCENT_RATE, LEVIATHAN_DESCENT_CAP, LEVIATHAN_PHASE_OFFSET,
     ARCHON_HP, ARCHON_SCORE, ARCHON_SPEED,
     ARCHON_BEAM_WARN_TIME, ARCHON_BEAM_ACTIVE_TIME, ARCHON_BEAM_COOLDOWN,
-    ARCHON_CAPTURE_TIME, ARCHON_BEAM_WIDTH, ARCHON_SHOOT_INTERVAL,
+    ARCHON_CAPTURE_TIME, ARCHON_BEAM_WIDTH, ARCHON_BEAM_INIT_WIDTH,
+    ARCHON_SHOOT_INTERVAL,
+    ARCHON_ORBIT_SPEED, ARCHON_ORBIT_VERT_AMP, ARCHON_BEAM_DRIFT_SPEED,
     COLOSSUS_TURRET_BASE_HP, COLOSSUS_TURRET_HP_SCALE,
     COLOSSUS_CORE_BASE_HP, COLOSSUS_CORE_HP_SCALE, COLOSSUS_SPEED,
     COLOSSUS_TURRET_SCORE, COLOSSUS_WIDTH, COLOSSUS_HEIGHT,
@@ -180,6 +184,7 @@ class PowerUp:
             self.kind, (200, 200, 200))
         self.angle = 0.0
         self.alive = True
+        self._glow_surf = pygame.Surface((44, 44), pygame.SRCALPHA)
 
     def update(self, dt: float) -> None:
         self.y += POWERUP_FALL_SPEED * dt
@@ -197,9 +202,9 @@ class PowerUp:
             for i in range(4)
         ]
         pygame.draw.polygon(surface, self.colour, pts)
-        glow = pygame.Surface((44, 44), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (*self.colour, 50), (22, 22), 22)
-        surface.blit(glow, (cx - 22, cy - 22))
+        self._glow_surf.fill((0, 0, 0, 0))
+        pygame.draw.circle(self._glow_surf, (*self.colour, 50), (22, 22), 22)
+        surface.blit(self._glow_surf, (cx - 22, cy - 22))
 
 
 # ── Achievement Banner ────────────────────────────────────────────────────────
@@ -372,6 +377,28 @@ class Barrier:
             pygame.draw.rect(surface, WHITE, (rect.x, rect.y, rect.width, 2))
 
 
+# ── Shared trail surface + helper ─────────────────────────────────────────────
+
+_trail_surf: pygame.Surface | None = None
+
+
+def _draw_trail(
+    surface: pygame.Surface,
+    x: int,
+    y: int,
+    colour: tuple[int, int, int],
+    ox: int,
+    oy: int,
+) -> None:
+    """Draw a 50x60 translucent ellipse trail behind a diver, reusing a cached surface."""
+    global _trail_surf
+    if _trail_surf is None:
+        _trail_surf = pygame.Surface((50, 60), pygame.SRCALPHA)
+    _trail_surf.fill((0, 0, 0, 0))
+    pygame.draw.ellipse(_trail_surf, (*colour, 35), (0, 0, 50, 60))
+    surface.blit(_trail_surf, (x + ox - 25, y + oy - 30))
+
+
 # ── Dive Bomber ───────────────────────────────────────────────────────────────
 
 class DiveBomber:
@@ -422,9 +449,7 @@ class DiveBomber:
         draw_fn = draw_alien_a if self.anim_frame == 0 else draw_alien_b
         draw_fn(surface, int(self.x) + ox, int(self.y) + oy, self.colour, 1.25,
                 tier=self.sprite_tier)
-        trail = pygame.Surface((50, 60), pygame.SRCALPHA)
-        pygame.draw.ellipse(trail, (*self.colour, 35), (0, 0, 50, 60))
-        surface.blit(trail, (int(self.x) + ox - 25, int(self.y) + oy - 30))
+        _draw_trail(surface, int(self.x), int(self.y), self.colour, ox, oy)
 
 
 # ── Galaga Diver ──────────────────────────────────────────────────────────────
@@ -477,9 +502,7 @@ class GalagaDiver:
         draw_fn = draw_alien_a if self.anim_frame == 0 else draw_alien_b
         draw_fn(surface, int(self.x) + ox, int(self.y) + oy, self.colour, 1.25,
                 tier=self.sprite_tier)
-        trail = pygame.Surface((50, 60), pygame.SRCALPHA)
-        pygame.draw.ellipse(trail, (*self.colour, 35), (0, 0, 50, 60))
-        surface.blit(trail, (int(self.x) + ox - 25, int(self.y) + oy - 30))
+        _draw_trail(surface, int(self.x), int(self.y), self.colour, ox, oy)
 
 
 # ── Boss base + variants ───────────────────────────────────────────────────────
@@ -578,6 +601,8 @@ class Mothership(_BossBase):
 
     def __init__(self, wave: int) -> None:
         self._common_init(wave)
+        self._glow_surf = pygame.Surface((280, 140), pygame.SRCALPHA)
+        self._glass_glow_surf = pygame.Surface((60, 38), pygame.SRCALPHA)
 
     def update(self, dt: float) -> None:
         self._tick_common(dt)
@@ -597,9 +622,9 @@ class Mothership(_BossBase):
         phase2   = self.is_phase2()
 
         glow_col = (255, 50, 50, 22) if phase2 else (255, 0, 255, 18)
-        glow = pygame.Surface((280, 140), pygame.SRCALPHA)
-        pygame.draw.ellipse(glow, glow_col, (0, 0, 280, 140))
-        surface.blit(glow, (cx - 140, cy - 70))
+        self._glow_surf.fill((0, 0, 0, 0))
+        pygame.draw.ellipse(self._glow_surf, glow_col, (0, 0, 280, 140))
+        surface.blit(self._glow_surf, (cx - 140, cy - 70))
 
         hull_col = WHITE if flashing else (RED if phase2 else HOT_PINK)
         dome_col = WHITE if flashing else (ORANGE if phase2 else HOT_PINK)
@@ -616,9 +641,9 @@ class Mothership(_BossBase):
         pygame.draw.ellipse(surface, hull_col, (cx - 88,  cy - 12, 176, 40), 2)
         pygame.draw.ellipse(surface, dome_col, (cx - 60,  cy - 68, 120, 62))
         pygame.draw.ellipse(surface, CYAN,     (cx - 30,  cy - 60,  60, 38))
-        glass_glow = pygame.Surface((60, 38), pygame.SRCALPHA)
-        pygame.draw.ellipse(glass_glow, (*CYAN, 70), (0, 0, 60, 38))
-        surface.blit(glass_glow, (cx - 30, cy - 60))
+        self._glass_glow_surf.fill((0, 0, 0, 0))
+        pygame.draw.ellipse(self._glass_glow_surf, (*CYAN, 70), (0, 0, 60, 38))
+        surface.blit(self._glass_glow_surf, (cx - 30, cy - 60))
 
         lc = YELLOW if self.anim_frame == 0 else ORANGE
         for lx in [-80, -52, -24, 4, 32, 60, 80]:
@@ -645,6 +670,7 @@ class Dreadnought(_BossBase):
         self.shield_speed  = 1.1          # rad/s rotation
         boss_tier          = max(1, wave // BOSS_WAVE_INTERVAL)
         self.gap_size      = math.pi * 0.45 - boss_tier * 0.02  # narrows with tier
+        self._glow_surf = pygame.Surface((300, 150), pygame.SRCALPHA)
 
     # ------------------------------------------------------------------
     def is_hittable(self, bx: float = 0.0, by: float = 0.0) -> bool:
@@ -683,9 +709,9 @@ class Dreadnought(_BossBase):
 
         # Glow
         glow_col = (50, 100, 255, 20) if not phase2 else (50, 200, 255, 28)
-        glow = pygame.Surface((300, 150), pygame.SRCALPHA)
-        pygame.draw.ellipse(glow, glow_col, (0, 0, 300, 150))
-        surface.blit(glow, (cx - 150, cy - 75))
+        self._glow_surf.fill((0, 0, 0, 0))
+        pygame.draw.ellipse(self._glow_surf, glow_col, (0, 0, 300, 150))
+        surface.blit(self._glow_surf, (cx - 150, cy - 75))
 
         # Hull — heavy rectangular saucer shape
         hull_col = WHITE if flashing else (CYAN if not phase2 else (180, 240, 255))
@@ -751,6 +777,8 @@ class SwarmQueen(_BossBase):
         self.spawn_pending  = False
         self._spawned_once  = False
         self.pulse_timer    = 0.0   # drives the organic pulsing effect
+        self._glow_surf = pygame.Surface((300, 150), pygame.SRCALPHA)
+        self._warn_surf = pygame.Surface((240, 60), pygame.SRCALPHA)
 
     def clear_spawn(self) -> None:
         self.spawn_pending = False
@@ -791,9 +819,9 @@ class SwarmQueen(_BossBase):
         glow_r = int(28 + 12 * pulse)
         glow_a = 20 + int(12 * pulse)
         glow_col = (200, 50, 255, glow_a)
-        glow = pygame.Surface((300, 150), pygame.SRCALPHA)
-        pygame.draw.ellipse(glow, glow_col, (0, 0, 300, 150))
-        surface.blit(glow, (cx - 150, cy - 75))
+        self._glow_surf.fill((0, 0, 0, 0))
+        pygame.draw.ellipse(self._glow_surf, glow_col, (0, 0, 300, 150))
+        surface.blit(self._glow_surf, (cx - 150, cy - 75))
 
         body_col  = WHITE if flashing else (HOT_PINK if not phase2 else RED)
         inner_col = WHITE if flashing else (LIME if not phase2 else ORANGE)
@@ -825,9 +853,9 @@ class SwarmQueen(_BossBase):
         # Spawn-pending warning flash
         if self.spawn_pending:
             warn_a = int(128 + 127 * math.sin(self.pulse_timer * 14))
-            warn_surf = pygame.Surface((240, 60), pygame.SRCALPHA)
-            pygame.draw.ellipse(warn_surf, (*LIME, warn_a), (0, 0, 240, 60))
-            surface.blit(warn_surf, (cx - 120, cy - 30))
+            self._warn_surf.fill((0, 0, 0, 0))
+            pygame.draw.ellipse(self._warn_surf, (*LIME, warn_a), (0, 0, 240, 60))
+            surface.blit(self._warn_surf, (cx - 120, cy - 30))
 
         self._draw_hp_bar(surface, cx, cy, bar_y_offset=-96)
 
@@ -851,6 +879,7 @@ class Phantom(_BossBase):
         self._visible      = True
         self._flicker_tick = 0.0
         self.decoys_spawned = False  # Phase 2 decoys
+        self._ghost_surf = pygame.Surface((300, 200), pygame.SRCALPHA)
 
     @property
     def visual_alpha(self) -> int:
@@ -901,7 +930,8 @@ class Phantom(_BossBase):
         phase2   = self.is_phase2()
 
         # Render onto an alpha surface so the whole sprite can fade
-        ghost = pygame.Surface((300, 200), pygame.SRCALPHA)
+        ghost = self._ghost_surf
+        ghost.fill((0, 0, 0, 0))
         gcx, gcy = 150, 100    # centre within the ghost surface
 
         glow_col = (180, 50, 255, int(18 * alpha / 255))
@@ -993,9 +1023,10 @@ class Sentinel(_HarbingerBase):
         self.size = 24  # collision radius
         # Swoop state
         self.base_y = y
-        self.swoop_timer = 5.0
+        self.swoop_timer = SENTINEL_SWOOP_INTERVAL
         self.swoop_state = self._SWOOP_NONE
         self.swoop_target_x = x
+        self._spawn_shimmer_surf = pygame.Surface((60, 60), pygame.SRCALPHA)
 
     def update(self, dt: float, player_x: float = 0.0) -> list:
         self._update_base(dt)
@@ -1018,11 +1049,11 @@ class Sentinel(_HarbingerBase):
                     self.swoop_target_x = player_x
         elif self.swoop_state == self._SWOOP_DIVING:
             # Dive toward player column and 120px lower
-            target_y = self.base_y + 180
+            target_y = self.base_y + SENTINEL_SWOOP_DEPTH
             dx = self.swoop_target_x - self.x
             dy = target_y - self.y
             dist = math.hypot(dx, dy)
-            dive_speed = self.speed * 2
+            dive_speed = self.speed * SENTINEL_DIVE_SPEED_MULT
             if dist < 8:
                 self.swoop_state = self._SWOOP_RETURNING
             else:
@@ -1034,7 +1065,7 @@ class Sentinel(_HarbingerBase):
             if abs(dy) < 6:
                 self.y = self.base_y
                 self.swoop_state = self._SWOOP_NONE
-                self.swoop_timer = 5.0
+                self.swoop_timer = SENTINEL_SWOOP_INTERVAL
             else:
                 self.y += math.copysign(self.speed * 1.5, dy) * dt
 
@@ -1104,9 +1135,9 @@ class Sentinel(_HarbingerBase):
         # Spawn shimmer
         if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
-            s = pygame.Surface((60, 60), pygame.SRCALPHA)
-            pygame.draw.circle(s, (0, 200, 255, alpha), (30, 30), 30)
-            surface.blit(s, (cx - 30, cy - 30))
+            self._spawn_shimmer_surf.fill((0, 0, 0, 0))
+            pygame.draw.circle(self._spawn_shimmer_surf, (0, 200, 255, alpha), (30, 30), 30)
+            surface.blit(self._spawn_shimmer_surf, (cx - 30, cy - 30))
 
         self._draw_hp_bar(surface, cx, cy)
 
@@ -1122,6 +1153,8 @@ class Wraith(_HarbingerBase):
         self.invuln_timer = 0.0
         self.shoot_timer = WRAITH_SHOOT_INTERVAL
         self.size = 20
+        self._shimmer_surf = pygame.Surface((50, 50), pygame.SRCALPHA)
+        self._spawn_surf = pygame.Surface((50, 50), pygame.SRCALPHA)
 
     def take_damage(self, dmg: int = 1) -> bool:
         if self.invuln_timer > 0:
@@ -1172,9 +1205,9 @@ class Wraith(_HarbingerBase):
         if self.shimmer_dest:
             gx, gy = int(self.shimmer_dest[0]), int(self.shimmer_dest[1])
             alpha = int(120 * (1 - self.shimmer_timer / WRAITH_SHIMMER_DURATION))
-            gs = pygame.Surface((50, 50), pygame.SRCALPHA)
-            pygame.draw.circle(gs, (200, 0, 255, alpha), (25, 25), 20)
-            surface.blit(gs, (gx - 25, gy - 25))
+            self._shimmer_surf.fill((0, 0, 0, 0))
+            pygame.draw.circle(self._shimmer_surf, (200, 0, 255, alpha), (25, 25), 20)
+            surface.blit(self._shimmer_surf, (gx - 25, gy - 25))
 
         # Main body - diamond shape
         col = WHITE if flashing else (200, 0, 255)
@@ -1190,9 +1223,9 @@ class Wraith(_HarbingerBase):
 
         if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
-            s = pygame.Surface((50, 50), pygame.SRCALPHA)
-            pygame.draw.circle(s, (200, 0, 255, alpha), (25, 25), 25)
-            surface.blit(s, (cx - 25, cy - 25))
+            self._spawn_surf.fill((0, 0, 0, 0))
+            pygame.draw.circle(self._spawn_surf, (200, 0, 255, alpha), (25, 25), 25)
+            surface.blit(self._spawn_surf, (cx - 25, cy - 25))
 
         self._draw_hp_bar(surface, cx, cy)
 
@@ -1332,15 +1365,15 @@ class Leviathan(_HarbingerBase):
             self.direction = -1
 
         # Slow vertical descent — creates urgency
-        if self.y < 500:
-            self.y += 12 * dt
+        if self.y < LEVIATHAN_DESCENT_CAP:
+            self.y += LEVIATHAN_DESCENT_RATE * dt
 
         # Sinusoidal bob
         self.bob_time += LEVIATHAN_BOB_FREQ * dt
         base_y = self.y
         for i, seg in enumerate(self.segments):
             seg.x = self.x + i * LEVIATHAN_SEGMENT_SPACING * self.direction
-            seg.y = base_y + math.sin(self.bob_time + i * 0.5) * LEVIATHAN_BOB_AMP
+            seg.y = base_y + math.sin(self.bob_time + i * LEVIATHAN_PHASE_OFFSET) * LEVIATHAN_BOB_AMP
 
         # Shooting from head
         head = self.head
@@ -1417,21 +1450,24 @@ class Archon(_HarbingerBase):
         self.center_x = x
         self.base_y = y
         self.orbit_rx = min(220, (WIDTH - 160) / 2)  # horizontal radius
+        # Cached surfaces
+        self._beam_surf = pygame.Surface((ARCHON_BEAM_WIDTH, HEIGHT), pygame.SRCALPHA)
+        self._spawn_shimmer_surf = pygame.Surface((70, 70), pygame.SRCALPHA)
 
     def update(self, dt: float, player_x: float, player_y: float) -> list:
         self._update_base(dt)
         bullets = []
 
         # Figure-8 Lissajous orbit
-        self.orbit_time += 0.55 * dt  # faster orbit
+        self.orbit_time += ARCHON_ORBIT_SPEED * dt
         self.x = self.center_x + math.sin(self.orbit_time) * self.orbit_rx
-        self.y = self.base_y + math.sin(2 * self.orbit_time) * 90
+        self.y = self.base_y + math.sin(2 * self.orbit_time) * ARCHON_ORBIT_VERT_AMP
         # Clamp to screen
         self.x = max(80, min(WIDTH - 80, self.x))
 
         # During beam phase: gently drift toward player X
         if self.beam_state in (self.STATE_BEAM_WARN, self.STATE_BEAM_ACTIVE):
-            drift = math.copysign(min(45, abs(player_x - self.beam_x)), player_x - self.beam_x) * dt
+            drift = math.copysign(min(ARCHON_BEAM_DRIFT_SPEED, abs(player_x - self.beam_x)), player_x - self.beam_x) * dt
             self.beam_x += drift
 
         # Beam state machine
@@ -1443,7 +1479,7 @@ class Archon(_HarbingerBase):
                 self.beam_x = self.x
                 self.beam_width = 8
         elif self.beam_state == self.STATE_BEAM_WARN:
-            self.beam_width = 8 + (ARCHON_BEAM_WIDTH - 8) * (1 - self.beam_timer / ARCHON_BEAM_WARN_TIME)
+            self.beam_width = ARCHON_BEAM_INIT_WIDTH + (ARCHON_BEAM_WIDTH - ARCHON_BEAM_INIT_WIDTH) * (1 - self.beam_timer / ARCHON_BEAM_WARN_TIME)
             if self.beam_timer <= 0:
                 self.beam_state = self.STATE_BEAM_ACTIVE
                 self.beam_timer = ARCHON_BEAM_ACTIVE_TIME
@@ -1503,25 +1539,28 @@ class Archon(_HarbingerBase):
         # Tractor beam
         if self.beam_state in (self.STATE_BEAM_WARN, self.STATE_BEAM_ACTIVE):
             bw = int(self.beam_width)
-            beam_surf = pygame.Surface((bw, HEIGHT - cy), pygame.SRCALPHA)
+            beam_h = HEIGHT - cy
+            # Reuse cached beam surface — fill only the needed region
+            self._beam_surf.fill((0, 0, 0, 0))
             if self.beam_state == self.STATE_BEAM_WARN:
                 alpha = int(60 + 40 * math.sin(pygame.time.get_ticks() * 0.01))
-                beam_surf.fill((255, 200, 0, alpha))
+                self._beam_surf.fill((255, 200, 0, alpha), (0, 0, bw, beam_h))
             else:
                 alpha = 100
-                beam_surf.fill((255, 180, 0, alpha))
+                self._beam_surf.fill((255, 180, 0, alpha), (0, 0, bw, beam_h))
                 # Capture progress indicator
                 if self.capture_progress > 0:
                     prog = self.capture_progress / ARCHON_CAPTURE_TIME
                     inner_alpha = int(60 + 140 * prog)
-                    beam_surf.fill((255, 255, 200, inner_alpha))
-            surface.blit(beam_surf, (int(self.beam_x) - bw // 2, cy + 20))
+                    self._beam_surf.fill((255, 255, 200, inner_alpha), (0, 0, bw, beam_h))
+            surface.blit(self._beam_surf, (int(self.beam_x) - bw // 2, cy + 20),
+                         area=(0, 0, bw, beam_h))
 
         if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
-            s = pygame.Surface((70, 70), pygame.SRCALPHA)
-            pygame.draw.circle(s, (255, 200, 0, alpha), (35, 35), 35)
-            surface.blit(s, (cx - 35, cy - 35))
+            self._spawn_shimmer_surf.fill((0, 0, 0, 0))
+            pygame.draw.circle(self._spawn_shimmer_surf, (255, 200, 0, alpha), (35, 35), 35)
+            surface.blit(self._spawn_shimmer_surf, (cx - 35, cy - 35))
 
         self._draw_hp_bar(surface, cx, cy)
 
@@ -1794,6 +1833,8 @@ class SolarFlare:
         self.target_y = 0.0
         self.warn_duration = 2.0
         self.active_duration = 0.5
+        self._warn_surf = pygame.Surface((WIDTH, 20), pygame.SRCALPHA)
+        self._beam_surf = pygame.Surface((WIDTH, 40), pygame.SRCALPHA)
 
     def reset(self) -> None:
         self.state = self.STATE_IDLE
@@ -1829,17 +1870,15 @@ class SolarFlare:
             # Orange glow line
             progress = 1 - self.timer / self.warn_duration
             alpha = int(40 + 80 * progress)
-            warn_surf = pygame.Surface((WIDTH, 20), pygame.SRCALPHA)
-            warn_surf.fill((255, 150, 0, alpha))
-            surface.blit(warn_surf, (0, ty - 10))
+            self._warn_surf.fill((255, 150, 0, alpha))
+            surface.blit(self._warn_surf, (0, ty - 10))
             # Pulsing outline
             if int(progress * 8) % 2 == 0:
                 pygame.draw.line(surface, (255, 180, 0), (0, ty), (WIDTH, ty), 1)
         elif self.state == self.STATE_ACTIVE:
             # Full beam
-            beam_surf = pygame.Surface((WIDTH, 40), pygame.SRCALPHA)
-            beam_surf.fill((255, 200, 50, 180))
-            surface.blit(beam_surf, (0, ty - 20))
+            self._beam_surf.fill((255, 200, 50, 180))
+            surface.blit(self._beam_surf, (0, ty - 20))
             # Bright core
             pygame.draw.line(surface, (255, 255, 200), (0, ty), (WIDTH, ty), 4)
             # Edge glow
@@ -1867,6 +1906,7 @@ class BonusEnemy:
         self.size = 14
         self.score = 100
         self.colour = random.choice([CYAN, HOT_PINK, LIME, ORANGE, YELLOW])
+        self._trail_surf = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
 
     def update(self, dt: float) -> None:
         if not self.alive:
@@ -1902,10 +1942,10 @@ class BonusEnemy:
         pygame.draw.polygon(surface, WHITE, pts, 1)
         # Trail effect
         trail_col = (*self.colour, 80) if len(self.colour) == 3 else self.colour
-        ts = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
-        pygame.draw.circle(ts, trail_col if len(trail_col) == 4 else (*trail_col, 80),
+        self._trail_surf.fill((0, 0, 0, 0))
+        pygame.draw.circle(self._trail_surf, trail_col if len(trail_col) == 4 else (*trail_col, 80),
                            (self.size, self.size), self.size)
-        surface.blit(ts, (cx - self.size, cy - self.size))
+        surface.blit(self._trail_surf, (cx - self.size, cy - self.size))
 
 
 # ── Boss factory ───────────────────────────────────────────────────────────────

@@ -302,6 +302,9 @@ SENTINEL_SHIELD_SPEED   = math.pi / 2      # 90 deg/s
 SENTINEL_SHIELD_SPEED_P2 = math.pi * 0.75  # 135 deg/s below 50% HP
 SENTINEL_SHIELD_RADIUS  = 55
 SENTINEL_SHOOT_INTERVAL = 2.5
+SENTINEL_SWOOP_DEPTH    = 180     # px below patrol height
+SENTINEL_SWOOP_INTERVAL = 5.0     # seconds between swoops
+SENTINEL_DIVE_SPEED_MULT = 2      # multiplier on base speed during dive
 
 # Wraith
 WRAITH_INTRO_WAVE       = 40
@@ -328,6 +331,9 @@ LEVIATHAN_SHOOT_INTERVAL = 3.0
 LEVIATHAN_REGROW_TIME   = 5.0    # seconds to regrow head after split
 LEVIATHAN_HEAD_SCORE    = 300
 LEVIATHAN_SEGMENT_SCORE = 100
+LEVIATHAN_DESCENT_RATE  = 12      # px/s downward creep
+LEVIATHAN_DESCENT_CAP   = 500     # max Y before stopping descent
+LEVIATHAN_PHASE_OFFSET  = 0.5     # radians between segments in bob
 
 # Archon
 ARCHON_INTRO_WAVE       = 55
@@ -339,7 +345,11 @@ ARCHON_BEAM_ACTIVE_TIME = 3.0    # seconds beam stays active
 ARCHON_BEAM_COOLDOWN    = 5.0    # seconds between beams
 ARCHON_CAPTURE_TIME     = 2.0    # seconds in beam to capture
 ARCHON_BEAM_WIDTH       = 40     # pixels wide
+ARCHON_BEAM_INIT_WIDTH  = 8      # narrow width during warning phase
 ARCHON_SHOOT_INTERVAL   = 2.0
+ARCHON_ORBIT_SPEED      = 0.55   # rad/s figure-8 orbit
+ARCHON_ORBIT_VERT_AMP   = 90     # px vertical amplitude
+ARCHON_BEAM_DRIFT_SPEED = 45     # px/s beam tracks player during active
 
 # Harbinger powerup drop chance (higher than regular aliens)
 HARBINGER_DROP_CHANCE   = 0.50
@@ -404,7 +414,8 @@ BONUS_FRAG_RADIUS      = 75.0    # pixels — chain-kill radius on explosion
 BONUS_POWERUP_EVERY    = 5       # drop a power-up every N kills
 
 # ── Graze Scoring ───────────────────────────────────────────────────────────
-GRAZE_DISTANCE         = 15      # pixels
+GRAZE_DISTANCE         = 15      # pixels (outer threshold)
+GRAZE_INNER_DISTANCE   = 18      # pixels (inner — closer is a hit, not a graze)
 GRAZE_POINTS           = 25
 
 # ── Proximity Kill ──────────────────────────────────────────────────────────
