@@ -6,6 +6,7 @@ one-line change with no risk of stale copies elsewhere.
 """
 from __future__ import annotations
 
+import math
 import os
 from enum import Enum
 
@@ -234,8 +235,8 @@ ORBIT_CENTER_Y    = 350      # center Y of orbit
 ORBIT_DRIFT_SPEED = 60       # horizontal drift speed of orbit center
 
 # ── Predator Lock-On (Sector IV) ─────────────────────────────────────────────
-PREDATOR_STALK_DURATION  = 8.0   # seconds for lock-on bar to fill
-PREDATOR_SURGE_DURATION  = 2.0   # seconds for downward surge
+PREDATOR_STALK_DURATION  = 5.6   # seconds for lock-on bar to fill (buffed: was 8.0)
+PREDATOR_SURGE_DURATION  = 1.6   # seconds for downward surge (buffed: was 2.0)
 PREDATOR_SURGE_DROP      = 380   # pixels descended during surge
 PREDATOR_RETREAT_SPEED   = 220   # pixels per second on return
 PREDATOR_ABORT_THRESHOLD = 0.40  # surge aborts if alive_frac falls below this
@@ -287,3 +288,151 @@ PRESSURE_PULSE_INTERVAL = 20.0   # seconds between pulses within a wave
 PRESSURE_PULSE_DROP     = 24     # extra pixels the formation drops on pulse (halved — 48 was too aggressive)
 PRESSURE_PULSE_BOOST    = 2.0    # enemy fire-rate multiplier during pulse
 PRESSURE_PULSE_DURATION = 5.0    # seconds the fire-rate boost lasts
+
+# ── Harbinger Elite Squadron ─────────────────────────────────────────────────
+HARBINGER_FIRST_WAVE = 35
+
+# Sentinel
+SENTINEL_INTRO_WAVE     = 35
+SENTINEL_HP             = 10
+SENTINEL_SCORE          = 200
+SENTINEL_SPEED          = 120     # px/s horizontal patrol
+SENTINEL_SHIELD_GAP     = math.pi * 0.35   # radians
+SENTINEL_SHIELD_SPEED   = math.pi / 2      # 90 deg/s
+SENTINEL_SHIELD_SPEED_P2 = math.pi * 0.75  # 135 deg/s below 50% HP
+SENTINEL_SHIELD_RADIUS  = 55
+SENTINEL_SHOOT_INTERVAL = 2.5
+
+# Wraith
+WRAITH_INTRO_WAVE       = 40
+WRAITH_HP               = 8
+WRAITH_SCORE            = 300
+WRAITH_TELEPORT_INTERVAL = 4.0
+WRAITH_SHIMMER_DURATION = 0.8
+WRAITH_INVULN_DURATION  = 0.3
+WRAITH_MISSILE_SPEED    = 280
+WRAITH_MISSILE_TRACKING = 2.5    # rad/s
+WRAITH_MISSILE_LIFETIME = 3.0
+WRAITH_SHOOT_INTERVAL   = 2.0
+
+# Leviathan
+LEVIATHAN_INTRO_WAVE    = 50
+LEVIATHAN_HEAD_HP       = 5
+LEVIATHAN_SEGMENT_HP    = 2
+LEVIATHAN_SEGMENTS      = 4      # body segments (total = 1 head + N body)
+LEVIATHAN_SEGMENT_SPACING = 36   # px between segments
+LEVIATHAN_SPEED         = 80     # px/s horizontal drift
+LEVIATHAN_BOB_AMP       = 40     # px vertical bob amplitude
+LEVIATHAN_BOB_FREQ      = 0.8    # oscillations/s
+LEVIATHAN_SHOOT_INTERVAL = 3.0
+LEVIATHAN_REGROW_TIME   = 5.0    # seconds to regrow head after split
+LEVIATHAN_HEAD_SCORE    = 300
+LEVIATHAN_SEGMENT_SCORE = 100
+
+# Archon
+ARCHON_INTRO_WAVE       = 55
+ARCHON_HP               = 12
+ARCHON_SCORE            = 500
+ARCHON_SPEED            = 100
+ARCHON_BEAM_WARN_TIME   = 1.5    # seconds of warning glow
+ARCHON_BEAM_ACTIVE_TIME = 3.0    # seconds beam stays active
+ARCHON_BEAM_COOLDOWN    = 5.0    # seconds between beams
+ARCHON_CAPTURE_TIME     = 2.0    # seconds in beam to capture
+ARCHON_BEAM_WIDTH       = 40     # pixels wide
+ARCHON_SHOOT_INTERVAL   = 2.0
+
+# Harbinger powerup drop chance (higher than regular aliens)
+HARBINGER_DROP_CHANCE   = 0.50
+
+# ── Colossus Boss ────────────────────────────────────────────────────────────
+COLOSSUS_FIRST_WAVE     = 50
+COLOSSUS_WAVE_INTERVAL  = 20
+COLOSSUS_TURRET_BASE_HP = 15
+COLOSSUS_TURRET_HP_SCALE = 4
+COLOSSUS_CORE_BASE_HP   = 40
+COLOSSUS_CORE_HP_SCALE  = 12
+COLOSSUS_SPEED          = 80
+COLOSSUS_TURRET_SCORE   = 200
+COLOSSUS_WIDTH          = 400    # visual width
+COLOSSUS_HEIGHT         = 200    # visual height
+
+BOSS_TITLES["Colossus"] = ("THE  COLOSSUS", "Destroy the turrets to expose the core.")
+
+# ── New Power-Up Kinds ───────────────────────────────────────────────────────
+class PowerUpKindEx(Enum):
+    """Extended power-up kinds (wave 35+)."""
+    HOMING    = "homing"
+    EMP       = "emp"
+    OVERCHARGE = "overcharge"
+    TIMEWARP  = "timewarp"
+
+POWERUP_COLOURS["homing"]     = (180, 80, 255)   # purple
+POWERUP_COLOURS["emp"]        = (100, 200, 255)   # light blue
+POWERUP_COLOURS["overcharge"] = (255, 255, 100)   # bright yellow
+POWERUP_COLOURS["timewarp"]   = (80, 180, 255)    # blue
+
+POWERUP_LABELS["homing"]     = "HOMING"
+POWERUP_LABELS["emp"]        = "EMP"
+POWERUP_LABELS["overcharge"] = "OVERCHARGE"
+POWERUP_LABELS["timewarp"]   = "TIME WARP"
+
+# Drop weight table (wave 35+). Higher weight = more common.
+POWERUP_WEIGHTS_EARLY: dict[str, float] = {
+    "rapid": 1.0, "spread": 1.0, "shield": 1.0, "bomb": 1.0,
+}
+POWERUP_WEIGHTS_LATE: dict[str, float] = {
+    "rapid": 0.6, "spread": 0.6, "shield": 1.0, "bomb": 1.0,
+    "homing": 1.5, "overcharge": 1.5, "emp": 1.2, "timewarp": 1.2,
+}
+
+# Homing bullet tracking
+HOMING_BULLET_TRACKING = 3.0     # rad/s
+
+# ── Solar Flare Hazard (Sector IV) ──────────────────────────────────────────
+SOLAR_FLARE_INTERVAL   = 15.0    # seconds between flares
+SOLAR_FLARE_WARN_TIME  = 2.0     # seconds of warning before beam
+SOLAR_FLARE_ACTIVE_TIME = 0.5    # seconds beam stays active
+SOLAR_FLARE_BEAM_HEIGHT = 40     # pixels tall
+
+# ── Bonus Round ─────────────────────────────────────────────────────────────
+BONUS_ROUND_INTERVAL   = 25      # every 25 waves
+BONUS_ROUND_ENEMIES    = 40
+BONUS_ROUND_SCORE      = 100     # per enemy
+BONUS_ROUND_PERFECT    = 10000   # perfect bonus
+BONUS_ROUND_DURATION   = 20.0    # seconds
+
+# ── Graze Scoring ───────────────────────────────────────────────────────────
+GRAZE_DISTANCE         = 15      # pixels
+GRAZE_POINTS           = 25
+
+# ── Proximity Kill ──────────────────────────────────────────────────────────
+PROXIMITY_KILL_DISTANCE = 120    # pixels
+PROXIMITY_KILL_MULT     = 2      # score multiplier
+
+# ── Weapon Synergies ────────────────────────────────────────────────────────
+SYNERGY_DEFINITIONS: list[dict] = [
+    {"id": "shrapnel_storm",  "name": "SHRAPNEL STORM",  "reqs": ["pierce", "frag"],
+     "colour": ORANGE,        "desc": "Pierce + split on every hit"},
+    {"id": "bullet_hell",     "name": "BULLET HELL",     "reqs": ["burst", "spread"],
+     "colour": HOT_PINK,      "desc": "Burst fires 5-bullet fan"},
+    {"id": "guardian_angel",  "name": "GUARDIAN ANGEL",   "reqs": ["drone", "speed"],
+     "colour": CYAN,          "desc": "Drone fires 2x faster"},
+    {"id": "glass_cannon",    "name": "GLASS CANNON",    "reqs": ["rapid_pu", "frag"],
+     "colour": RED,           "desc": "2x frag damage, 2x damage taken"},
+    {"id": "fortress",        "name": "FORTRESS",        "reqs": ["regen", "burst"],
+     "colour": LIME,          "desc": "Barriers regen 3 blocks"},
+    {"id": "predator_syn",    "name": "PREDATOR",        "reqs": ["pierce", "speed"],
+     "colour": YELLOW,        "desc": "50% faster bullets, +1 pierce"},
+    {"id": "seeker_swarm",    "name": "SEEKER SWARM",    "reqs": ["homing_pu", "frag"],
+     "colour": (180, 80, 255), "desc": "Homing frag splits track enemies"},
+    {"id": "chain_lightning",  "name": "CHAIN LIGHTNING", "reqs": ["homing_pu", "pierce"],
+     "colour": (100, 200, 255), "desc": "Homing chains through 3 enemies"},
+    {"id": "magnetic_storm",  "name": "MAGNETIC STORM",  "reqs": ["emp_pu", "drone"],
+     "colour": BLUE,          "desc": "EMP triggers drone burst"},
+    {"id": "berserker",       "name": "BERSERKER",       "reqs": ["overcharge_pu", "burst"],
+     "colour": (255, 255, 100), "desc": "Every shot is a burst"},
+    {"id": "frozen_barrage",  "name": "FROZEN BARRAGE",  "reqs": ["timewarp_pu", "spread"],
+     "colour": (80, 180, 255), "desc": "5-bullet spread with 1.5x damage"},
+    {"id": "annihilator",     "name": "ANNIHILATOR",     "reqs": ["overcharge_pu", "pierce"],
+     "colour": WHITE,         "desc": "3x damage, pierces shields"},
+]

@@ -42,14 +42,27 @@ from si_constants import (
     BOSS_TITLES,
     PRESSURE_PULSE_INTERVAL, PRESSURE_PULSE_DROP,
     PRESSURE_PULSE_BOOST, PRESSURE_PULSE_DURATION,
+    SENTINEL_HP, WRAITH_HP, ARCHON_HP,
+    SOLAR_FLARE_INTERVAL,
+    BONUS_ROUND_INTERVAL, BONUS_ROUND_ENEMIES, BONUS_ROUND_SCORE,
+    BONUS_ROUND_PERFECT, BONUS_ROUND_DURATION,
+    GRAZE_DISTANCE, GRAZE_POINTS, PROXIMITY_KILL_DISTANCE, PROXIMITY_KILL_MULT,
+    POWERUP_WEIGHTS_EARLY, POWERUP_WEIGHTS_LATE, PowerUpKindEx,
+    SYNERGY_DEFINITIONS,
+    COLOSSUS_TURRET_SCORE,
+    ARCHON_CAPTURE_TIME,
+    HOMING_BULLET_TRACKING,
 )
 from si_audio import SoundManager
 from si_entities import (
     Alien, Bullet, EnemyBullet,
     Particle, Star, PowerUp, AchievementBanner, ComboPopup,
     UFO, Barrier, DiveBomber, GalagaDiver, ShipFragment,
-    Mothership, Dreadnought, SwarmQueen, Phantom, make_boss,
+    Mothership, Dreadnought, SwarmQueen, Phantom, Colossus, make_boss,
     draw_ship, draw_alien_a, draw_alien_b,
+    Sentinel, Wraith, HomingMissile, Leviathan, LeviathanSegment,
+    Archon, ColossusTurret, WeightedPowerUp, SolarFlare, BonusEnemy,
+    _HarbingerBase,
 )
 from si_persistence import (
     load_highscores, save_highscore,
@@ -254,6 +267,33 @@ class Game:
         self.boss_title_name:  str   = ""
         self.boss_title_sub:   str   = ""
 
+        # ── Harbinger Elite Squadron ─────────────────────────────────────────
+        self.harbingers: list[_HarbingerBase] = []
+        self.homing_missiles: list[HomingMissile] = []
+
+        # ── Solar Flare (Sector IV) ─────────────────────────────────────────
+        self.solar_flare: SolarFlare = SolarFlare()
+
+        # ── Bonus Round ──────────────────────────────────────────────────────
+        self.bonus_round_active: bool = False
+        self.bonus_round_enemies: list[BonusEnemy] = []
+        self.bonus_round_killed: int = 0
+        self.bonus_round_timer: float = 0.0
+
+        # ── Graze Scoring ────────────────────────────────────────────────────
+        self.graze_count: int = 0
+        self.wave_graze_count: int = 0
+
+        # ── Weapon Synergies ─────────────────────────────────────────────────
+        self.active_synergies: set[str] = set()
+
+        # ── Dual Fighter (Archon reward) ─────────────────────────────────────
+        self.dual_fighter: bool = False
+        self.dual_fighter_wave: int = 0  # wave it was activated on
+
+        # ── Reinforcement wave tracking (waves 50+) ─────────────────────────
+        self.reinforcement_sent: bool = False
+
         self._spawn_wave()
 
     def _spawn_swarm_queen_drones(self) -> None:
@@ -295,6 +335,11 @@ class Game:
 
         diff = DIFFICULTY_SETTINGS[self.difficulty]
 
+        # ── Bonus round check (every 25 waves) ──────────────────────────
+        if self.wave > 1 and self.wave % BONUS_ROUND_INTERVAL == 0:
+            self._start_bonus_round()
+            return
+
         if self.wave % BOSS_WAVE_INTERVAL == 0:
             self.boss = make_boss(self.wave)
             self.sfx.play("boss")
@@ -330,7 +375,11 @@ class Game:
         self.enemy_bullet_speed = min(
             450, (ENEMY_BULLET_SPEED + 10 * (self.wave - 1)) * diff["bullet_speed"]
         )
-        self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, 0.22)
+        # Drop rate rebalance: higher cap past wave 40
+        drop_cap = 0.28 if self.wave >= 40 else 0.22
+        self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, drop_cap)
+        # Power-up duration scales with wave
+        self.powerup_duration = min(8, 5 + (self.wave - 1) // 20)
         self.current_alien_drop   = min(40, ALIEN_DROP + self.wave // 3)
         self.enemy_shoot_timer    = self.enemy_shoot_interval
         self._base_shoot_interval = self.enemy_shoot_interval   # FIX-2: store base for pulse restore
@@ -344,12 +393,38 @@ class Game:
         self.dive_bombers = []
         self.galaga_divers = []
         self.galaga_kill_counter = 0
-        self.dive_timer   = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
+        # Faster divers past wave 50
+        if self.wave > 50:
+            self.dive_timer = random.uniform(6.0, 12.0)
+        else:
+            self.dive_timer = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
         self.wave_kills   = 0
         self.last_stand_active = False
         self.pressure_pulse_timer  = PRESSURE_PULSE_INTERVAL
         self.pressure_pulse_active = 0.0
         self.wave_start_time = pygame.time.get_ticks() / 1000.0
+
+        # Reset Harbinger state
+        self.harbingers = []
+        self.homing_missiles = []
+        self.reinforcement_sent = False
+        self.wave_graze_count = 0
+
+        # Reset solar flare for Sector IV
+        sector_idx = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
+        if sector_idx == 3:  # Sector IV
+            self.solar_flare.reset()
+
+        # Dual-fighter expires at end of wave
+        if self.dual_fighter and self.wave != self.dual_fighter_wave:
+            self.dual_fighter = False
+
+        # ── Spawn Harbinger elites (non-boss waves 35+) ─────────────────
+        if self.wave >= 35 and self.boss is None:
+            self._spawn_harbingers()
+
+        # Detect active synergies
+        self._update_synergies()
 
         # Create movement pattern for this sector
         sector = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
@@ -362,6 +437,89 @@ class Game:
         if self.active_upgrades.get("regen", 0) > 0:
             for barrier in self.barriers:
                 barrier.regen_blocks()
+
+    def _spawn_harbingers(self) -> None:
+        """Spawn Harbinger elite enemies based on wave number."""
+        w = self.wave
+        spawns: list[type] = []
+
+        if w >= 65:
+            spawns = [Sentinel, Sentinel, Wraith, Leviathan, Leviathan, Archon]
+        elif w >= 55:
+            spawns = [Sentinel, Wraith, Leviathan, Leviathan, Archon]
+        elif w >= 50:
+            spawns = [Sentinel, Wraith, Leviathan, Archon]
+        elif w >= 45:
+            spawns = [Sentinel, Sentinel, Wraith, Leviathan]
+        elif w >= 40:
+            spawns = [Sentinel, Wraith]
+        elif w >= 35:
+            spawns = [Sentinel]
+
+        for i, cls in enumerate(spawns):
+            x = 100 + (WIDTH - 200) * (i + 1) / (len(spawns) + 1)
+            y = 60 + random.uniform(-10, 10)
+            self.harbingers.append(cls(x, y))
+
+    def _start_bonus_round(self) -> None:
+        """Start a Galaga-style bonus round."""
+        self.bonus_round_active = True
+        self.bonus_round_killed = 0
+        self.bonus_round_timer = BONUS_ROUND_DURATION
+        self.bonus_round_enemies = []
+
+        # Create enemies on choreographed paths
+        for i in range(BONUS_ROUND_ENEMIES):
+            delay = i * 0.3
+            pattern = i % 4
+            path: list[tuple[float, float]] = []
+            cx = WIDTH // 2
+            cy = HEIGHT // 2
+
+            if pattern == 0:
+                # Figure-8
+                for t_step in range(20):
+                    t = t_step / 19
+                    px = cx + 300 * math.sin(2 * math.pi * t)
+                    py = 100 + 250 * math.sin(4 * math.pi * t)
+                    path.append((px, py))
+            elif pattern == 1:
+                # Spiral in from left
+                for t_step in range(20):
+                    t = t_step / 19
+                    px = -40 + (WIDTH + 80) * t
+                    py = 200 + 150 * math.sin(3 * math.pi * t)
+                    path.append((px, py))
+            elif pattern == 2:
+                # Diamond sweep
+                path = [(-40, 200), (cx, 80), (WIDTH + 40, 200),
+                        (cx, HEIGHT - 150), (-40, 200)]
+            else:
+                # Spiral in from right
+                for t_step in range(20):
+                    t = t_step / 19
+                    px = WIDTH + 40 - (WIDTH + 80) * t
+                    py = 150 + 200 * math.sin(2.5 * math.pi * t)
+                    path.append((px, py))
+
+            self.bonus_round_enemies.append(BonusEnemy(path, speed=180, delay=delay))
+
+        self.banners.append(AchievementBanner("BONUS ROUND!", self.font_sm))
+        self.enemy_bullets = []
+
+    def _update_synergies(self) -> None:
+        """Check active upgrades and power-ups for synergy combos."""
+        self.active_synergies.clear()
+        for syn in SYNERGY_DEFINITIONS:
+            reqs = syn["reqs"]
+            all_met = True
+            for req in reqs:
+                # Check both permanent upgrades and temporary power-ups
+                if req not in self.active_upgrades and req not in self.active_powerups:
+                    all_met = False
+                    break
+            if all_met:
+                self.active_synergies.add(syn["id"])
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -417,6 +575,33 @@ class Game:
         self.sfx.play("bomb")
         self.bomb_flash_timer = 0.18
         self._try_achievement("Nuclear Option")
+
+    def _trigger_emp(self) -> None:
+        """EMP pulse: stuns regular aliens, disables Harbinger shields/abilities."""
+        # Stun all regular aliens for 1.5s (freeze movement)
+        self.bomb_flash_timer = 0.25
+        self._add_shake(4, 0.2)
+        # Disable Harbinger shields for 3s
+        for harb in self.harbingers:
+            if isinstance(harb, Sentinel):
+                harb.spawn_timer = 3.0  # repurpose as stun timer
+            elif isinstance(harb, Wraith):
+                harb.invuln_timer = 0  # break invulnerability
+                harb.teleport_timer = 3.0  # delay next teleport
+        # Kill all homing missiles
+        for m in self.homing_missiles:
+            self._spawn_explosion(m.x, m.y, CYAN, count=3)
+            m.alive = False
+        self.homing_missiles = []
+        # Clear enemy bullets
+        self.enemy_bullets = []
+        self.banners.append(AchievementBanner("EMP!", self.font_sm))
+        self.sfx.play("bomb")
+
+    def _trigger_game_over(self) -> None:
+        """Transition to game over state."""
+        self.state = GameState.GAME_OVER
+        self.sfx.music_channel.stop()
 
     def _check_life_milestones(self) -> None:
         while (self.next_life_milestone_idx < len(EXTRA_LIFE_MILESTONES) and
@@ -792,6 +977,15 @@ class Game:
                     pierce_remaining=pierce_lvl,
                 ))
 
+            # ── Dual-fighter second shot ──────────────────────────────
+            if self.dual_fighter:
+                self.bullets.append(Bullet(
+                    x=float(self.player_x + 20), y=float(by),
+                    vx=0.0, vy=-BULLET_SPEED,
+                    colour=bullet_col,
+                    pierce_remaining=pierce_lvl,
+                ))
+
             if has_burst:
                 self.burst_shot_count += 1
                 if self.burst_shot_count % 3 == 0:
@@ -808,8 +1002,21 @@ class Game:
                 ))
 
         # ── Move player bullets ───────────────────────────────────────────
+        homing_active = "homing" in self.active_powerups
         alive_bullets: list[Bullet] = []
         for b in self.bullets:
+            # Homing: curve toward nearest enemy
+            if homing_active and self.aliens:
+                nearest = min(self.aliens, key=lambda a: math.hypot(a.x - b.x, a.y - b.y))
+                desired = math.atan2(nearest.y - b.y, nearest.x - b.x)
+                current = math.atan2(b.vy, b.vx)
+                diff_a = (desired - current + math.pi) % (2 * math.pi) - math.pi
+                steer = max(-HOMING_BULLET_TRACKING * dt,
+                            min(HOMING_BULLET_TRACKING * dt, diff_a))
+                spd = math.hypot(b.vx, b.vy)
+                new_a = current + steer
+                b.vx = math.cos(new_a) * spd
+                b.vy = math.sin(new_a) * spd
             b.x += b.vx * dt
             b.y += b.vy * dt
             if b.frag_life > 0:
@@ -903,12 +1110,16 @@ class Game:
             # Restore to base interval when pulse not active
             self.enemy_shoot_interval = self._base_shoot_interval
 
+        # ── Time Warp slow-down ───────────────────────────────────────────
+        time_warp = "timewarp" in self.active_powerups
+        enemy_dt = dt * 0.5 if time_warp else dt
+
         # ── Move aliens ───────────────────────────────────────────────────
         if self.aliens and self.movement_pattern:
             if self.last_stand_active:
                 for a in self.aliens:
-                    a.x += a.scatter_vx * dt
-                    a.y += a.scatter_vy * dt
+                    a.x += a.scatter_vx * enemy_dt
+                    a.y += a.scatter_vy * enemy_dt
                     a.base_x, a.base_y = a.x, a.y
                     if a.x < 40:
                         a.x = 40
@@ -928,7 +1139,7 @@ class Game:
                 last_alien_mode = (len(self.aliens) == 1
                                    and not self.boss and not self.dive_bombers)
                 self.alien_dir, self.alien_speed = self.movement_pattern.update(
-                    self.aliens, dt, self.alien_speed, self.alien_dir,
+                    self.aliens, enemy_dt, self.alien_speed, self.alien_dir,
                     last_alien_mode)
             for a in self.aliens:
                 if a.hit_flash > 0:
@@ -982,7 +1193,20 @@ class Game:
 
         # ── Boss update & shooting ────────────────────────────────────────
         if self.boss and self.boss.alive:
-            self.boss.update(dt)
+            if not isinstance(self.boss, Colossus):
+                self.boss.update(dt)
+            # Phantom decoys on phase 2
+            if (isinstance(self.boss, Phantom) and self.boss.is_phase2()
+                    and not self.boss.decoys_spawned):
+                self.boss.decoys_spawned = True
+                for dx_off in (-120, 120):
+                    self.aliens.append(Alien(
+                        x=self.boss.x + dx_off, y=self.boss.y,
+                        colour=(200, 80, 255), hp=1, sprite_tier=0,
+                        grid_col=0, grid_row=0,
+                        base_x=self.boss.x + dx_off, base_y=self.boss.y,
+                    ))
+                self.banners.append(AchievementBanner("DECOYS!", self.font_sm))
             if self.boss.should_shoot():
                 if self.boss.is_phase2():
                     for spread_angle in (-0.22, 0.0, 0.22):
@@ -1009,6 +1233,128 @@ class Game:
                         vy=(raw_dy / dist) * spd,
                     ))
                 self.sfx.play("enemy_shoot")
+
+        # ── Colossus turret shooting (handled by boss.update) ────────────
+        if self.boss and self.boss.alive and isinstance(self.boss, Colossus):
+            colossus_bullets = self.boss.update(dt, self.player_x, self.player_y)
+            for cb in colossus_bullets:
+                self.enemy_bullets.append(cb)
+
+        # ── Harbinger Elite update & shooting ────────────────────────────
+        for harb in self.harbingers:
+            if not harb.alive:
+                continue
+            if isinstance(harb, Sentinel):
+                new_bullets = harb.update(dt)
+                self.enemy_bullets.extend(new_bullets)
+            elif isinstance(harb, Wraith):
+                new_missiles = harb.update(dt, self.player_x, self.player_y)
+                self.homing_missiles.extend(new_missiles)
+            elif isinstance(harb, Leviathan):
+                new_bullets = harb.update(dt)
+                self.enemy_bullets.extend(new_bullets)
+            elif isinstance(harb, Archon):
+                new_bullets = harb.update(dt, self.player_x, self.player_y)
+                self.enemy_bullets.extend(new_bullets)
+                # Check capture completion
+                if harb.is_capturing() and not harb.has_captured:
+                    harb.has_captured = True
+                    self.lives -= 1
+                    self._add_shake(8, 0.4)
+                    self.sfx.play("player_hit")
+                    if self.lives <= 0:
+                        self._trigger_game_over()
+                        return
+
+        self.harbingers = [h for h in self.harbingers if h.alive]
+
+        # ── Update homing missiles ───────────────────────────────────────
+        for m in self.homing_missiles:
+            m.update(dt, self.player_x, self.player_y)
+        self.homing_missiles = [m for m in self.homing_missiles if m.alive]
+
+        # ── Solar flare update (Sector IV only) ──────────────────────────
+        sector_idx = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
+        if sector_idx == 3:
+            self.solar_flare.update(dt)
+            # Check if flare hits player
+            if self.solar_flare.is_hitting(self.player_x, self.player_y):
+                self._player_hit()
+            # Check if flare hits aliens
+            if self.solar_flare.state == SolarFlare.STATE_ACTIVE:
+                for a in self.aliens:
+                    if self.solar_flare.is_hitting(a.x, a.y, 12):
+                        a.hp = 0
+                # Remove dead aliens from flare
+                flare_killed = [a for a in self.aliens if a.hp <= 0]
+                for a in flare_killed:
+                    self._spawn_explosion(a.x, a.y, ORANGE, count=6)
+                    self.score += 10
+                self.aliens = [a for a in self.aliens if a.hp > 0]
+
+        # ── Bonus round update ───────────────────────────────────────────
+        if self.bonus_round_active:
+            self.bonus_round_timer -= dt
+            for be in self.bonus_round_enemies:
+                be.update(dt)
+            self.bonus_round_enemies = [be for be in self.bonus_round_enemies if be.alive]
+            # Check if bonus round is over
+            if self.bonus_round_timer <= 0 or not self.bonus_round_enemies:
+                perfect = self.bonus_round_killed >= BONUS_ROUND_ENEMIES
+                if perfect:
+                    self.score += BONUS_ROUND_PERFECT
+                    self.banners.append(AchievementBanner("PERFECT!", self.font_sm))
+                    self.sfx.play("achieve")
+                self.bonus_round_active = False
+                self.bonus_round_enemies = []
+                # Proceed to next wave
+                self.wave += 1
+                self.wave_summary_timer = 3.5
+                self.state = GameState.WAVE_SUMMARY
+                return
+
+        # ── Graze scoring ────────────────────────────────────────────────
+        for eb in self.enemy_bullets:
+            dx_g = eb.x - self.player_x
+            dy_g = eb.y - self.player_y
+            dist_g = math.hypot(dx_g, dy_g)
+            if dist_g < GRAZE_DISTANCE and dist_g > 18:  # close but not a hit
+                self.score += GRAZE_POINTS
+                self.graze_count += 1
+                self.wave_graze_count += 1
+                # Spark particle
+                self.particles.append(Particle(
+                    self.player_x + dx_g * 0.5,
+                    self.player_y + dy_g * 0.5,
+                    WHITE, speed=80, size=2, life=0.15,
+                ))
+
+        # ── Reinforcement waves (wave 50+, every 3rd non-boss wave) ─────
+        if (self.wave > 50 and not self.reinforcement_sent
+                and self.wave % BOSS_WAVE_INTERVAL != 0
+                and (self.wave - 51) % 3 == 0 and self.aliens):
+            initial_count = (min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
+                             * ALIEN_COLS)
+            if len(self.aliens) < initial_count * 0.5:
+                self.reinforcement_sent = True
+                alien_hp = min(3, 1 + (self.wave - 1) // 20)
+                y_offset = min((self.wave - 1) * 8, 100)
+                for row in range(3):
+                    sprite_tier = min(2, row // 2)
+                    for col in range(ALIEN_COLS):
+                        ax = ALIEN_X_START + col * ALIEN_X_SPACING
+                        ay = ALIEN_Y_START + row * ALIEN_Y_SPACING + y_offset - 40
+                        colour = ALIEN_ROW_COLOURS[row % len(ALIEN_ROW_COLOURS)]
+                        self.aliens.append(
+                            Alien(x=ax, y=ay, colour=colour, hp=alien_hp,
+                                  sprite_tier=sprite_tier,
+                                  grid_col=col, grid_row=row,
+                                  base_x=ax, base_y=ay))
+                self.banners.append(AchievementBanner("REINFORCEMENTS!", self.font_sm))
+                self._add_shake(4, 0.2)
+
+        # ── Update synergies each frame ──────────────────────────────────
+        self._update_synergies()
 
         # ── Move enemy bullets ────────────────────────────────────────────
         alive_eb: list[EnemyBullet] = []
@@ -1189,7 +1535,8 @@ class Game:
                     continue
                 if abs(b.x - a.x) < 28 and abs(b.y - a.y) < 24:
                     aliens_touched.add(ai)
-                    a.hp -= 1
+                    dmg = 2 if "overcharge" in self.active_powerups else 1
+                    a.hp -= dmg
                     self.shots_hit += 1
 
                     if b.pierce_remaining > 0:
@@ -1225,15 +1572,22 @@ class Game:
             self.combo_count  += 1
             self.combo_timer   = COMBO_WINDOW
             self.combo_multiplier = min(5, 1 + self.combo_count // 2)
-            pts = 10 * self.combo_multiplier
+            pdist_a = math.hypot(a.x - self.player_x, a.y - self.player_y)
+            prox = PROXIMITY_KILL_MULT if pdist_a < PROXIMITY_KILL_DISTANCE else 1
+            pts = 10 * self.combo_multiplier * prox
             self.score += pts
+            if prox > 1:
+                self.combo_popups.append(ComboPopup(
+                    int(a.x), int(a.y) - 20, 0, self.font_sm,
+                    text="DANGER KILL!"))
             self._check_life_milestones()
             self.wave_kills += 1
 
             # ── Galaga pair dive trigger ──────────────────────────────────────
             self.galaga_kill_counter += 1
             entering_now = self.movement_pattern and self.movement_pattern.is_entering()
-            if (self.galaga_kill_counter % 8 == 0
+            galaga_threshold = 6 if self.wave > 50 else 8
+            if (self.galaga_kill_counter % galaga_threshold == 0
                     and len(self.aliens) >= 4
                     and self.boss is None
                     and not self.galaga_divers
@@ -1292,7 +1646,8 @@ class Game:
                 self.combo_popups.append(
                     ComboPopup(a.x, a.y, self.combo_multiplier, self.font_med))
             if random.random() < self.powerup_drop_chance:
-                self.powerups.append(PowerUp(a.x, a.y))
+                pu_kind = WeightedPowerUp.weighted_random_type(self.wave)
+                self.powerups.append(PowerUp(a.x, a.y, kind=pu_kind))
             # Always remove by object identity — the galaga trigger (and any
             # other mid-loop mutation) may have shifted the original index.
             if a in self.aliens:
@@ -1374,8 +1729,176 @@ class Game:
                     self._frenzy_kill()
                     break
 
+        # ── Player bullets vs Harbingers ──────────────────────────────────
+        for bi, b in enumerate(self.bullets):
+            if bi in bullets_hit:
+                continue
+            for harb in self.harbingers:
+                if not harb.alive:
+                    continue
+                dist_h = math.hypot(b.x - harb.x, b.y - harb.y)
+                hit_radius = getattr(harb, "size", 20)
+                if dist_h < hit_radius + 10:
+                    # Sentinel: check shield block
+                    if isinstance(harb, Sentinel) and harb.is_shot_blocked_by_shield(b.x, b.y):
+                        bullets_hit.add(bi)
+                        self.sfx.play("explode")
+                        self.particles.append(Particle(
+                            b.x, b.y, CYAN, speed=100, size=3, life=0.2))
+                        break
+                    self.shots_hit += 1
+                    killed = harb.take_damage(1)
+                    bullets_hit.add(bi)
+                    self.sfx.play("explode")
+                    # Proximity kill bonus
+                    pdist = math.hypot(harb.x - self.player_x, harb.y - self.player_y)
+                    prox_mult = PROXIMITY_KILL_MULT if pdist < PROXIMITY_KILL_DISTANCE else 1
+                    if killed:
+                        pts = harb.score * prox_mult
+                        self.score += pts
+                        self._check_life_milestones()
+                        self._spawn_explosion(harb.x, harb.y, HOT_PINK, count=20)
+                        self.combo_popups.append(ComboPopup(
+                            int(harb.x), int(harb.y), 0, self.font_med,
+                            text=f"+{pts}!"))
+                        if pdist < PROXIMITY_KILL_DISTANCE:
+                            self.combo_popups.append(ComboPopup(
+                                int(harb.x), int(harb.y) - 20, 0, self.font_sm,
+                                text="DANGER KILL!"))
+                        # Archon: dual fighter reward
+                        if isinstance(harb, Archon) and harb.has_captured:
+                            self.dual_fighter = True
+                            self.dual_fighter_wave = self.wave
+                            self.banners.append(
+                                AchievementBanner("DUAL FIGHTER!", self.font_sm))
+                        # 50% power-up drop from Harbingers
+                        if random.random() < 0.5:
+                            pu_type = WeightedPowerUp.weighted_random_type(self.wave)
+                            self.powerups.append(PowerUp(
+                                int(harb.x), int(harb.y), kind=pu_type))
+                    else:
+                        self._add_shake(2, 0.08)
+                    break
+
+            # Leviathan segment collision (separate check)
+            for harb in self.harbingers:
+                if bi in bullets_hit:
+                    break
+                if not isinstance(harb, Leviathan) or not harb.alive:
+                    continue
+                for si, seg in enumerate(harb.segments):
+                    if not seg.alive:
+                        continue
+                    if math.hypot(b.x - seg.x, b.y - seg.y) < seg.size + 8:
+                        bullets_hit.add(bi)
+                        self.shots_hit += 1
+                        score_g, killed_c = harb.hit_segment(si)
+                        if score_g > 0:
+                            self.score += score_g
+                            self._spawn_explosion(seg.x, seg.y, LIME, count=8)
+                        else:
+                            self.particles.append(Particle(
+                                seg.x, seg.y, WHITE, speed=80, size=2, life=0.2))
+                        self.sfx.play("explode")
+                        break
+
+        # ── Player bullets vs Colossus turrets ───────────────────────────
+        if self.boss and self.boss.alive and isinstance(self.boss, Colossus):
+            for bi, b in enumerate(self.bullets):
+                if bi in bullets_hit:
+                    continue
+                # Check turrets first
+                hit_turret = False
+                for turret in self.boss.turrets:
+                    if not turret.alive:
+                        continue
+                    if abs(b.x - turret.x) < 16 and abs(b.y - turret.y) < 16:
+                        bullets_hit.add(bi)
+                        self.shots_hit += 1
+                        killed_t = turret.take_damage(1)
+                        self.sfx.play("explode")
+                        self._add_shake(2, 0.08)
+                        if killed_t:
+                            self.score += COLOSSUS_TURRET_SCORE
+                            self._spawn_explosion(turret.x, turret.y, ORANGE, count=16)
+                            self.combo_popups.append(ComboPopup(
+                                int(turret.x), int(turret.y), 0, self.font_sm,
+                                text=f"+{COLOSSUS_TURRET_SCORE}"))
+                        hit_turret = True
+                        break
+                # Check core (only if exposed and not hit turret)
+                if not hit_turret and self.boss.core_exposed:
+                    if abs(b.x - self.boss.x) < 20 and abs(b.y - self.boss.y) < 20:
+                        bullets_hit.add(bi)
+                        self.shots_hit += 1
+                        self.boss.take_damage(1)
+                        self.sfx.play("explode")
+                        self._add_shake(3, 0.1)
+                        if not self.boss.alive:
+                            pts = 1000 + self.wave * 75
+                            self.score += pts
+                            self._check_life_milestones()
+                            self._spawn_explosion(self.boss.x, self.boss.y, RED, count=30)
+                            self._spawn_explosion(self.boss.x, self.boss.y, GOLD, count=30)
+                            self.boss_cinematic_timer = 2.5
+                            self.boss_cinematic_x = self.boss.x
+                            self.boss_cinematic_y = self.boss.y
+                            self._add_shake(20, 1.0)
+                            self.sfx.play("bomb")
+                            # Drop 2 upgrade choices
+                            self.combo_popups.append(ComboPopup(
+                                int(self.boss.x), int(self.boss.y), 0,
+                                self.font_med, text=f"+{pts}!"))
+                            for _ in range(4):
+                                self.powerups.append(PowerUp(
+                                    int(self.boss.x) + random.randint(-120, 120),
+                                    int(self.boss.y)))
+                            self.boss = None
+                            self._try_achievement("Boss Slayer")
+                            break
+
+        # ── Player bullets vs homing missiles (shoot them down) ──────────
+        for bi, b in enumerate(self.bullets):
+            if bi in bullets_hit:
+                continue
+            for m in self.homing_missiles:
+                if not m.alive:
+                    continue
+                if math.hypot(b.x - m.x, b.y - m.y) < m.size + 8:
+                    m.alive = False
+                    bullets_hit.add(bi)
+                    self.shots_hit += 1
+                    self.score += 5
+                    self._spawn_explosion(m.x, m.y, RED, count=4)
+                    break
+
+        # ── Player bullets vs bonus round enemies ────────────────────────
+        if self.bonus_round_active:
+            for bi, b in enumerate(self.bullets):
+                if bi in bullets_hit:
+                    continue
+                for be in self.bonus_round_enemies:
+                    if not be.alive or not be.active:
+                        continue
+                    if math.hypot(b.x - be.x, b.y - be.y) < be.size + 8:
+                        be.alive = False
+                        bullets_hit.add(bi)
+                        self.bonus_round_killed += 1
+                        self.score += BONUS_ROUND_SCORE
+                        self._spawn_explosion(be.x, be.y, be.colour, count=10)
+                        self.sfx.play("explode")
+                        break
+
+        # ── Homing missiles vs player ────────────────────────────────────
+        for m in self.homing_missiles:
+            if not m.alive:
+                continue
+            if math.hypot(m.x - self.player_x, m.y - self.player_y) < 20:
+                m.alive = False
+                self._player_hit()
+
         # ── Player bullets vs boss ────────────────────────────────────────
-        if self.boss and self.boss.alive:
+        if self.boss and self.boss.alive and not isinstance(self.boss, Colossus):
             for bi, b in enumerate(self.bullets):
                 if bi in bullets_hit:
                     continue
@@ -1449,8 +1972,11 @@ class Game:
                     elif pu.kind == "bomb":
                         self._trigger_bomb()
                         self._try_achievement("Nuclear Option")
+                    elif pu.kind == "emp":
+                        self._trigger_emp()
                     else:
-                        self.active_powerups[pu.kind] = POWERUP_DURATION
+                        dur = getattr(self, "powerup_duration", POWERUP_DURATION)
+                        self.active_powerups[pu.kind] = dur
                     if self.powerups_collected_wave >= 3:
                         self._try_achievement("Power Collector")
                 else:
@@ -1518,7 +2044,9 @@ class Game:
             self.continue_available = True
 
         # ── Wave clear ────────────────────────────────────────────────────
-        if not self.aliens and not self.dive_bombers and not self.galaga_divers and self.boss is None:
+        if (not self.aliens and not self.dive_bombers and not self.galaga_divers
+                and self.boss is None and not self.harbingers
+                and not self.bonus_round_active):
             if not self.wave_damage_taken:
                 self._try_achievement("Untouchable")
             if self.shots_fired > 0 and self.shots_hit / self.shots_fired >= 0.9:
@@ -1887,6 +2415,31 @@ class Game:
         for diver in self.galaga_divers:
             diver.draw(self.screen, offset)
 
+        # ── Harbinger elites ─────────────────────────────────────────────
+        for harb in self.harbingers:
+            if harb.alive:
+                harb.draw(self.screen)
+
+        # ── Homing missiles ─────────────────────────────────────────────
+        for m in self.homing_missiles:
+            m.draw(self.screen)
+
+        # ── Bonus round enemies ──────────────────────────────────────────
+        if self.bonus_round_active:
+            for be in self.bonus_round_enemies:
+                be.draw(self.screen)
+            # Bonus round HUD
+            br_txt = self.font_sm.render(
+                f"BONUS: {self.bonus_round_killed}/{BONUS_ROUND_ENEMIES}  "
+                f"TIME: {max(0, self.bonus_round_timer):.1f}s",
+                True, GOLD)
+            self.screen.blit(br_txt, (WIDTH // 2 - br_txt.get_width() // 2, 20))
+
+        # ── Solar flare ──────────────────────────────────────────────────
+        sector_idx = min(len(SECTOR_DATA) - 1, (self.wave - 1) // 10)
+        if sector_idx == 3:
+            self.solar_flare.draw(self.screen)
+
         if self.boss and self.boss.alive:
             self.boss.draw(self.screen, offset)
 
@@ -1963,8 +2516,35 @@ class Game:
         if self.sector_transition_timer > 0:
             self._draw_sector_transition()
 
-        # ── Predator lock-on bar ──────────────────────────────────────────────
+        # ── Predator lock-on targeting laser ─────────────────────────────────
         lock_prog = getattr(self.movement_pattern, "lock_on_progress", None)
+        if lock_prog is not None and lock_prog > 0.3 and self.aliens:
+            # Draw red line from locked alien to player
+            nearest_alien = min(self.aliens, key=lambda a: math.hypot(
+                a.x - self.player_x, a.y - self.player_y))
+            laser_alpha = int(80 + 120 * lock_prog)
+            laser_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.line(laser_surf, (255, 0, 0, laser_alpha),
+                             (int(nearest_alien.x), int(nearest_alien.y)),
+                             (int(self.player_x), int(self.player_y)), 2)
+            self.screen.blit(laser_surf, (0, 0))
+            # Red screen border tint at high progress
+            if lock_prog > 0.7:
+                tint_alpha = int(30 * (lock_prog - 0.7) / 0.3)
+                tint = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                tint.fill((255, 0, 0, tint_alpha))
+                self.screen.blit(tint, (0, 0))
+
+        # ── Active synergy indicators ────────────────────────────────────────
+        if self.active_synergies:
+            sy = 70
+            for syn in SYNERGY_DEFINITIONS:
+                if syn["id"] in self.active_synergies:
+                    stxt = self.font_xs.render(syn["name"], True, syn.get("colour", WHITE))
+                    self.screen.blit(stxt, (10, sy))
+                    sy += 16
+
+        # ── Predator lock-on bar ──────────────────────────────────────────────
         if lock_prog is not None:
             bar_x, bar_y, bar_w, bar_h = 1550, 18, 280, 22
             # Background track

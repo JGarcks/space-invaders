@@ -16,12 +16,31 @@ import pygame
 from si_constants import (
     WIDTH, HEIGHT,
     BG, CYAN, HOT_PINK, LIME, ORANGE, YELLOW, RED, BLUE, WHITE, GOLD,
-    POWERUP_FALL_SPEED, POWERUP_TYPES, POWERUP_COLOURS,
+    POWERUP_FALL_SPEED, POWERUP_TYPES, POWERUP_COLOURS, POWERUP_WEIGHTS_EARLY,
+    POWERUP_WEIGHTS_LATE,
     UFO_Y,
     BARRIER_BLOCK_W, BARRIER_BLOCK_H,
     DIVE_SPEED,
     BOSS_WAVE_INTERVAL,
     DIM_WHITE,
+    SENTINEL_HP, SENTINEL_SCORE, SENTINEL_SPEED,
+    SENTINEL_SHIELD_GAP, SENTINEL_SHIELD_SPEED, SENTINEL_SHIELD_SPEED_P2,
+    SENTINEL_SHIELD_RADIUS, SENTINEL_SHOOT_INTERVAL,
+    WRAITH_HP, WRAITH_SCORE, WRAITH_TELEPORT_INTERVAL,
+    WRAITH_SHIMMER_DURATION, WRAITH_INVULN_DURATION,
+    WRAITH_MISSILE_SPEED, WRAITH_MISSILE_TRACKING, WRAITH_MISSILE_LIFETIME,
+    WRAITH_SHOOT_INTERVAL,
+    LEVIATHAN_HEAD_HP, LEVIATHAN_SEGMENT_HP, LEVIATHAN_SEGMENTS,
+    LEVIATHAN_SEGMENT_SPACING, LEVIATHAN_SPEED, LEVIATHAN_BOB_AMP,
+    LEVIATHAN_BOB_FREQ, LEVIATHAN_SHOOT_INTERVAL, LEVIATHAN_REGROW_TIME,
+    LEVIATHAN_HEAD_SCORE, LEVIATHAN_SEGMENT_SCORE,
+    ARCHON_HP, ARCHON_SCORE, ARCHON_SPEED,
+    ARCHON_BEAM_WARN_TIME, ARCHON_BEAM_ACTIVE_TIME, ARCHON_BEAM_COOLDOWN,
+    ARCHON_CAPTURE_TIME, ARCHON_BEAM_WIDTH, ARCHON_SHOOT_INTERVAL,
+    COLOSSUS_TURRET_BASE_HP, COLOSSUS_TURRET_HP_SCALE,
+    COLOSSUS_CORE_BASE_HP, COLOSSUS_CORE_HP_SCALE, COLOSSUS_SPEED,
+    COLOSSUS_TURRET_SCORE, COLOSSUS_WIDTH, COLOSSUS_HEIGHT,
+    HOMING_BULLET_TRACKING,
 )
 
 
@@ -154,10 +173,11 @@ class Star:
 # ── PowerUp ───────────────────────────────────────────────────────────────────
 
 class PowerUp:
-    def __init__(self, x: float, y: float) -> None:
+    def __init__(self, x: float, y: float, kind: str | None = None) -> None:
         self.x, self.y = x, y
-        self.kind: str = random.choice(POWERUP_TYPES)
-        self.colour: tuple[int, int, int] = POWERUP_COLOURS[self.kind]
+        self.kind: str = kind if kind is not None else random.choice(POWERUP_TYPES)
+        self.colour: tuple[int, int, int] = POWERUP_COLOURS.get(
+            self.kind, (200, 200, 200))
         self.angle = 0.0
         self.alive = True
 
@@ -821,7 +841,7 @@ class Phantom(_BossBase):
     """
 
     # Phase durations (seconds)
-    _VISIBLE_TIME  = 3.8
+    _VISIBLE_TIME  = 3.0   # buffed: was 3.8
     _HIDDEN_TIME   = 2.6
     _FLICKER_TIME  = 0.6   # at the end of visible phase — rapid flicker warning
 
@@ -830,6 +850,7 @@ class Phantom(_BossBase):
         self._phase_timer  = 0.0
         self._visible      = True
         self._flicker_tick = 0.0
+        self.decoys_spawned = False  # Phase 2 decoys
 
     @property
     def visual_alpha(self) -> int:
@@ -909,6 +930,932 @@ class Phantom(_BossBase):
         self._draw_hp_bar(surface, cx, cy, bar_y_offset=-102)
 
 
+# ── Harbinger Elite Squadron ──────────────────────────────────────────────────
+
+class _HarbingerBase:
+    """Shared functionality for Harbinger-class enemies."""
+
+    kind: str = "harbinger"
+
+    def __init__(self, x: float, y: float, hp: int, score: int) -> None:
+        self.x = x
+        self.y = y
+        self.hp = hp
+        self.max_hp = hp
+        self.score = score
+        self.alive = True
+        self.flash_timer = 0.0
+        self.spawn_timer = 1.0  # brief invuln on spawn
+
+    def take_damage(self, dmg: int = 1) -> bool:
+        if self.spawn_timer > 0:
+            return False
+        self.hp -= dmg
+        self.flash_timer = 0.12
+        if self.hp <= 0:
+            self.alive = False
+            return True
+        return False
+
+    def _update_base(self, dt: float) -> None:
+        if self.spawn_timer > 0:
+            self.spawn_timer -= dt
+        if self.flash_timer > 0:
+            self.flash_timer -= dt
+
+    def _draw_hp_bar(self, surface: pygame.Surface, cx: int, cy: int,
+                     bar_w: int = 40, bar_y_offset: int = -30) -> None:
+        ratio = max(0, self.hp / self.max_hp)
+        bx = cx - bar_w // 2
+        by = cy + bar_y_offset
+        pygame.draw.rect(surface, (60, 60, 60), (bx, by, bar_w, 4))
+        col = LIME if ratio > 0.5 else YELLOW if ratio > 0.25 else RED
+        pygame.draw.rect(surface, col, (bx, by, int(bar_w * ratio), 4))
+
+
+class Sentinel(_HarbingerBase):
+    """Rotating-shield elite. Player must shoot through the gap."""
+
+    def __init__(self, x: float, y: float) -> None:
+        super().__init__(x, y, SENTINEL_HP, SENTINEL_SCORE)
+        self.speed = SENTINEL_SPEED
+        self.direction = 1
+        self.shield_angle = 0.0
+        self.shield_gap = SENTINEL_SHIELD_GAP
+        self.shield_speed = SENTINEL_SHIELD_SPEED
+        self.shield_radius = SENTINEL_SHIELD_RADIUS
+        self.shoot_timer = SENTINEL_SHOOT_INTERVAL
+        self.size = 24  # collision radius
+
+    def update(self, dt: float) -> list:
+        self._update_base(dt)
+        # Horizontal patrol
+        self.x += self.speed * self.direction * dt
+        if self.x < 60:
+            self.x = 60
+            self.direction = 1
+        elif self.x > WIDTH - 60:
+            self.x = WIDTH - 60
+            self.direction = -1
+
+        # Shield rotation speeds up below 50% HP
+        spd = SENTINEL_SHIELD_SPEED_P2 if self.hp < self.max_hp * 0.5 else SENTINEL_SHIELD_SPEED
+        self.shield_angle += spd * dt
+
+        # Shooting
+        bullets = []
+        self.shoot_timer -= dt
+        if self.shoot_timer <= 0 and self.spawn_timer <= 0:
+            self.shoot_timer = SENTINEL_SHOOT_INTERVAL
+            # Triple-shot spread
+            for angle_off in (-0.3, 0.0, 0.3):
+                bx = self.x + math.sin(angle_off) * 10
+                bullets.append(EnemyBullet(
+                    x=bx, y=self.y + 20,
+                    vx=math.sin(angle_off) * 80,
+                    vy=220 + angle_off * 40,
+                ))
+        return bullets
+
+    def is_shot_blocked_by_shield(self, bx: float, by: float) -> bool:
+        """Check if a player bullet at (bx, by) hits the shield instead of the body."""
+        dx = bx - self.x
+        dy = by - self.y
+        dist = math.hypot(dx, dy)
+        if dist < self.size:
+            return False  # inside shield = hits body
+        if abs(dist - self.shield_radius) > 12:
+            return False  # too far from shield ring
+        # Check if the bullet angle is outside the gap
+        bullet_angle = math.atan2(dy, dx)
+        gap_center = self.shield_angle
+        diff = (bullet_angle - gap_center + math.pi) % (2 * math.pi) - math.pi
+        return abs(diff) > self.shield_gap / 2
+
+    def draw(self, surface: pygame.Surface) -> None:
+        cx, cy = int(self.x), int(self.y)
+        flashing = self.flash_timer > 0
+        body_col = WHITE if flashing else (0, 200, 255)
+
+        # Body - hexagonal shape
+        pts = []
+        for i in range(6):
+            a = math.pi / 3 * i - math.pi / 6
+            pts.append((cx + int(self.size * math.cos(a)),
+                         cy + int(self.size * math.sin(a))))
+        pygame.draw.polygon(surface, body_col, pts)
+        pygame.draw.polygon(surface, CYAN, pts, 2)
+
+        # Shield ring with gap
+        sr = self.shield_radius
+        gap_half = self.shield_gap / 2
+        start_a = self.shield_angle + gap_half
+        end_a = self.shield_angle + 2 * math.pi - gap_half
+        # Draw shield as arc segments
+        steps = 32
+        shield_pts = []
+        for i in range(steps + 1):
+            t = start_a + (end_a - start_a) * i / steps
+            shield_pts.append((cx + int(sr * math.cos(t)),
+                               cy + int(sr * math.sin(t))))
+        if len(shield_pts) > 1:
+            pygame.draw.lines(surface, (0, 180, 255), False, shield_pts, 3)
+
+        # Spawn shimmer
+        if self.spawn_timer > 0:
+            alpha = int(180 * self.spawn_timer)
+            s = pygame.Surface((60, 60), pygame.SRCALPHA)
+            pygame.draw.circle(s, (0, 200, 255, alpha), (30, 30), 30)
+            surface.blit(s, (cx - 30, cy - 30))
+
+        self._draw_hp_bar(surface, cx, cy)
+
+
+class Wraith(_HarbingerBase):
+    """Teleporting elite. Fires homing missiles."""
+
+    def __init__(self, x: float, y: float) -> None:
+        super().__init__(x, y, WRAITH_HP, WRAITH_SCORE)
+        self.teleport_timer = WRAITH_TELEPORT_INTERVAL
+        self.shimmer_timer = 0.0
+        self.shimmer_dest = None  # (x, y) of next teleport destination
+        self.invuln_timer = 0.0
+        self.shoot_timer = WRAITH_SHOOT_INTERVAL
+        self.size = 20
+
+    def take_damage(self, dmg: int = 1) -> bool:
+        if self.invuln_timer > 0:
+            return False
+        return super().take_damage(dmg)
+
+    def update(self, dt: float, player_x: float, player_y: float) -> list:
+        self._update_base(dt)
+        missiles = []
+
+        if self.invuln_timer > 0:
+            self.invuln_timer -= dt
+
+        # Shimmer phase: ghost visible at destination
+        if self.shimmer_timer > 0:
+            self.shimmer_timer -= dt
+            if self.shimmer_timer <= 0:
+                # Teleport!
+                self.x, self.y = self.shimmer_dest
+                self.shimmer_dest = None
+                self.invuln_timer = WRAITH_INVULN_DURATION
+        else:
+            # Count down to next teleport
+            self.teleport_timer -= dt
+            if self.teleport_timer <= 0:
+                self.teleport_timer = WRAITH_TELEPORT_INTERVAL
+                self.shimmer_dest = (
+                    random.uniform(60, WIDTH - 60),
+                    random.uniform(60, HEIGHT * 0.45),
+                )
+                self.shimmer_timer = WRAITH_SHIMMER_DURATION
+
+        # Shooting
+        self.shoot_timer -= dt
+        if self.shoot_timer <= 0 and self.spawn_timer <= 0 and self.shimmer_timer <= 0:
+            self.shoot_timer = WRAITH_SHOOT_INTERVAL
+            missiles.append(HomingMissile(
+                x=self.x, y=self.y + 15,
+                target_x=player_x, target_y=player_y,
+            ))
+        return missiles
+
+    def draw(self, surface: pygame.Surface) -> None:
+        cx, cy = int(self.x), int(self.y)
+        flashing = self.flash_timer > 0
+
+        # Draw shimmer ghost at destination
+        if self.shimmer_dest:
+            gx, gy = int(self.shimmer_dest[0]), int(self.shimmer_dest[1])
+            alpha = int(120 * (1 - self.shimmer_timer / WRAITH_SHIMMER_DURATION))
+            gs = pygame.Surface((50, 50), pygame.SRCALPHA)
+            pygame.draw.circle(gs, (200, 0, 255, alpha), (25, 25), 20)
+            surface.blit(gs, (gx - 25, gy - 25))
+
+        # Main body - diamond shape
+        col = WHITE if flashing else (200, 0, 255)
+        if self.invuln_timer > 0:
+            col = (100, 0, 128)  # dim while invulnerable
+        pts = [(cx, cy - 22), (cx + 18, cy), (cx, cy + 22), (cx - 18, cy)]
+        pygame.draw.polygon(surface, col, pts)
+        pygame.draw.polygon(surface, HOT_PINK, pts, 2)
+
+        # Eye
+        pygame.draw.circle(surface, (255, 0, 200), (cx, cy), 5)
+        pygame.draw.circle(surface, WHITE, (cx, cy), 2)
+
+        if self.spawn_timer > 0:
+            alpha = int(180 * self.spawn_timer)
+            s = pygame.Surface((50, 50), pygame.SRCALPHA)
+            pygame.draw.circle(s, (200, 0, 255, alpha), (25, 25), 25)
+            surface.blit(s, (cx - 25, cy - 25))
+
+        self._draw_hp_bar(surface, cx, cy)
+
+
+@dataclass
+class HomingMissile:
+    """A homing projectile fired by a Wraith. Can be shot down (1 HP)."""
+    x: float
+    y: float
+    target_x: float
+    target_y: float
+    speed: float = WRAITH_MISSILE_SPEED
+    tracking: float = WRAITH_MISSILE_TRACKING
+    lifetime: float = WRAITH_MISSILE_LIFETIME
+    alive: bool = True
+    angle: float = field(default=math.pi / 2)  # starts going down
+    size: float = 6.0
+
+    def update(self, dt: float, player_x: float, player_y: float) -> None:
+        if not self.alive:
+            return
+        self.lifetime -= dt
+        if self.lifetime <= 0:
+            self.alive = False
+            return
+        # Steer toward player
+        desired = math.atan2(player_y - self.y, player_x - self.x)
+        diff = (desired - self.angle + math.pi) % (2 * math.pi) - math.pi
+        steer = max(-self.tracking * dt, min(self.tracking * dt, diff))
+        self.angle += steer
+        self.x += math.cos(self.angle) * self.speed * dt
+        self.y += math.sin(self.angle) * self.speed * dt
+        # Off-screen check
+        if self.x < -20 or self.x > WIDTH + 20 or self.y < -20 or self.y > HEIGHT + 20:
+            self.alive = False
+
+    def draw(self, surface: pygame.Surface) -> None:
+        if not self.alive:
+            return
+        cx, cy = int(self.x), int(self.y)
+        # Small triangle pointing in travel direction
+        tip_x = cx + int(math.cos(self.angle) * 8)
+        tip_y = cy + int(math.sin(self.angle) * 8)
+        left_x = cx + int(math.cos(self.angle + 2.5) * 6)
+        left_y = cy + int(math.sin(self.angle + 2.5) * 6)
+        right_x = cx + int(math.cos(self.angle - 2.5) * 6)
+        right_y = cy + int(math.sin(self.angle - 2.5) * 6)
+        pygame.draw.polygon(surface, (255, 80, 80), [(tip_x, tip_y), (left_x, left_y), (right_x, right_y)])
+        # Trail
+        tail_x = cx - int(math.cos(self.angle) * 10)
+        tail_y = cy - int(math.sin(self.angle) * 10)
+        pygame.draw.line(surface, (255, 150, 50), (cx, cy), (tail_x, tail_y), 2)
+
+
+class LeviathanSegment:
+    """One segment of a Leviathan chain."""
+
+    def __init__(self, x: float, y: float, is_head: bool = False) -> None:
+        self.x = x
+        self.y = y
+        self.is_head = is_head
+        self.hp = LEVIATHAN_HEAD_HP if is_head else LEVIATHAN_SEGMENT_HP
+        self.alive = True
+        self.flash_timer = 0.0
+        self.size = 16 if is_head else 12
+
+    def take_damage(self, dmg: int = 1) -> int:
+        """Returns damage actually dealt (0 if body absorbs for head protection)."""
+        self.hp -= dmg
+        self.flash_timer = 0.12
+        if self.hp <= 0:
+            self.alive = False
+        return dmg
+
+    def draw(self, surface: pygame.Surface) -> None:
+        cx, cy = int(self.x), int(self.y)
+        flashing = self.flash_timer > 0
+        if self.is_head:
+            col = WHITE if flashing else (0, 255, 180)
+            pygame.draw.circle(surface, col, (cx, cy), self.size)
+            # Eyes
+            pygame.draw.circle(surface, (255, 255, 0), (cx - 5, cy - 4), 3)
+            pygame.draw.circle(surface, (255, 255, 0), (cx + 5, cy - 4), 3)
+            pygame.draw.circle(surface, (0, 0, 0), (cx - 5, cy - 4), 1)
+            pygame.draw.circle(surface, (0, 0, 0), (cx + 5, cy - 4), 1)
+        else:
+            col = WHITE if flashing else (0, 200, 140)
+            pygame.draw.circle(surface, col, (cx, cy), self.size)
+            pygame.draw.circle(surface, (0, 140, 100), (cx, cy), self.size, 2)
+
+
+class Leviathan(_HarbingerBase):
+    """Multi-segment chain enemy that splits when a middle segment is hit."""
+
+    def __init__(self, x: float, y: float, num_segments: int = LEVIATHAN_SEGMENTS) -> None:
+        super().__init__(x, y, 999, 0)  # HP managed per-segment
+        self.speed = LEVIATHAN_SPEED
+        self.direction = 1
+        self.bob_time = random.uniform(0, math.pi * 2)
+        self.shoot_timer = LEVIATHAN_SHOOT_INTERVAL
+        self.segments: list[LeviathanSegment] = []
+        # Build chain: head first, then body
+        for i in range(num_segments):
+            sx = x + i * LEVIATHAN_SEGMENT_SPACING
+            self.segments.append(LeviathanSegment(sx, y, is_head=(i == 0)))
+        self.regrow_timers: list[float] = []  # for split halves that need new heads
+
+    @property
+    def head(self) -> LeviathanSegment | None:
+        for s in self.segments:
+            if s.is_head and s.alive:
+                return s
+        return None
+
+    def update(self, dt: float) -> list:
+        self._update_base(dt)
+        bullets = []
+
+        # Remove dead segments
+        self.segments = [s for s in self.segments if s.alive]
+        if not self.segments:
+            self.alive = False
+            return bullets
+
+        # Flash timers
+        for s in self.segments:
+            if s.flash_timer > 0:
+                s.flash_timer -= dt
+
+        # Horizontal movement
+        self.x += self.speed * self.direction * dt
+        if self.x < 80:
+            self.x = 80
+            self.direction = 1
+        elif self.x > WIDTH - 80:
+            self.x = WIDTH - 80
+            self.direction = -1
+
+        # Sinusoidal bob
+        self.bob_time += LEVIATHAN_BOB_FREQ * dt
+        base_y = self.y
+        for i, seg in enumerate(self.segments):
+            seg.x = self.x + i * LEVIATHAN_SEGMENT_SPACING * self.direction
+            seg.y = base_y + math.sin(self.bob_time + i * 0.5) * LEVIATHAN_BOB_AMP
+
+        # Shooting from head
+        head = self.head
+        if head and self.spawn_timer <= 0:
+            self.shoot_timer -= dt
+            if self.shoot_timer <= 0:
+                self.shoot_timer = LEVIATHAN_SHOOT_INTERVAL
+                bullets.append(EnemyBullet(x=head.x, y=head.y + 18, vx=0.0, vy=200))
+
+        return bullets
+
+    def hit_segment(self, seg_index: int, dmg: int = 1) -> tuple[int, int]:
+        """Hit a segment. Returns (score_gained, segments_killed).
+        Hitting a middle segment splits the chain."""
+        if seg_index < 0 or seg_index >= len(self.segments):
+            return (0, 0)
+        seg = self.segments[seg_index]
+        if not seg.alive:
+            return (0, 0)
+
+        seg.take_damage(dmg)
+        score = 0
+        killed = 0
+        if not seg.alive:
+            score = LEVIATHAN_HEAD_SCORE if seg.is_head else LEVIATHAN_SEGMENT_SCORE
+            killed = 1
+        return (score, killed)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        # Draw connections between segments
+        alive_segs = [s for s in self.segments if s.alive]
+        for i in range(len(alive_segs) - 1):
+            a, b = alive_segs[i], alive_segs[i + 1]
+            pygame.draw.line(surface, (0, 160, 120),
+                             (int(a.x), int(a.y)), (int(b.x), int(b.y)), 3)
+        # Draw each segment
+        for s in alive_segs:
+            s.draw(surface)
+        # HP bar shows total remaining segments
+        if alive_segs:
+            head = alive_segs[0]
+            total_hp = sum(s.hp for s in alive_segs)
+            max_hp = len(alive_segs) * LEVIATHAN_SEGMENT_HP
+            ratio = total_hp / max(1, max_hp)
+            bx = int(head.x) - 25
+            by = int(head.y) - 28
+            pygame.draw.rect(surface, (60, 60, 60), (bx, by, 50, 4))
+            col = LIME if ratio > 0.5 else YELLOW if ratio > 0.25 else RED
+            pygame.draw.rect(surface, col, (bx, by, int(50 * ratio), 4))
+
+
+class Archon(_HarbingerBase):
+    """Tractor beam elite. Can capture the player's ship for a dual-fighter reward."""
+
+    STATE_IDLE = 0
+    STATE_BEAM_WARN = 1
+    STATE_BEAM_ACTIVE = 2
+    STATE_COOLDOWN = 3
+
+    def __init__(self, x: float, y: float) -> None:
+        super().__init__(x, y, ARCHON_HP, ARCHON_SCORE)
+        self.speed = ARCHON_SPEED
+        self.direction = 1
+        self.beam_state = self.STATE_IDLE
+        self.beam_timer = ARCHON_BEAM_COOLDOWN  # start with cooldown
+        self.beam_x = x  # X position of beam
+        self.capture_progress = 0.0  # 0 to ARCHON_CAPTURE_TIME
+        self.has_captured = False
+        self.shoot_timer = ARCHON_SHOOT_INTERVAL
+        self.size = 28
+        self.beam_width = 8  # starts narrow during warning
+
+    def update(self, dt: float, player_x: float, player_y: float) -> list:
+        self._update_base(dt)
+        bullets = []
+
+        # Horizontal patrol
+        self.x += self.speed * self.direction * dt
+        if self.x < 80:
+            self.x = 80
+            self.direction = 1
+        elif self.x > WIDTH - 80:
+            self.x = WIDTH - 80
+            self.direction = -1
+
+        # Beam state machine
+        self.beam_timer -= dt
+        if self.beam_state == self.STATE_IDLE:
+            if self.beam_timer <= 0:
+                self.beam_state = self.STATE_BEAM_WARN
+                self.beam_timer = ARCHON_BEAM_WARN_TIME
+                self.beam_x = self.x
+                self.beam_width = 8
+        elif self.beam_state == self.STATE_BEAM_WARN:
+            self.beam_width = 8 + (ARCHON_BEAM_WIDTH - 8) * (1 - self.beam_timer / ARCHON_BEAM_WARN_TIME)
+            if self.beam_timer <= 0:
+                self.beam_state = self.STATE_BEAM_ACTIVE
+                self.beam_timer = ARCHON_BEAM_ACTIVE_TIME
+                self.beam_width = ARCHON_BEAM_WIDTH
+        elif self.beam_state == self.STATE_BEAM_ACTIVE:
+            # Check if player is in beam
+            if abs(player_x - self.beam_x) < self.beam_width / 2:
+                self.capture_progress += dt
+            else:
+                self.capture_progress = max(0, self.capture_progress - dt * 0.5)
+            if self.beam_timer <= 0:
+                self.beam_state = self.STATE_COOLDOWN
+                self.beam_timer = ARCHON_BEAM_COOLDOWN
+                self.capture_progress = 0
+        elif self.beam_state == self.STATE_COOLDOWN:
+            if self.beam_timer <= 0:
+                self.beam_state = self.STATE_IDLE
+                self.beam_timer = 2.0  # short idle before next cycle
+
+        # Shooting between beam activations
+        if self.beam_state in (self.STATE_IDLE, self.STATE_COOLDOWN):
+            self.shoot_timer -= dt
+            if self.shoot_timer <= 0 and self.spawn_timer <= 0:
+                self.shoot_timer = ARCHON_SHOOT_INTERVAL
+                for angle_off in (-0.25, 0.0, 0.25):
+                    bullets.append(EnemyBullet(
+                        x=self.x + math.sin(angle_off) * 12,
+                        y=self.y + 25,
+                        vx=math.sin(angle_off) * 60,
+                        vy=200,
+                    ))
+
+        return bullets
+
+    def is_capturing(self) -> bool:
+        return (self.beam_state == self.STATE_BEAM_ACTIVE and
+                self.capture_progress >= ARCHON_CAPTURE_TIME)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        cx, cy = int(self.x), int(self.y)
+        flashing = self.flash_timer > 0
+        col = WHITE if flashing else (255, 200, 0)
+
+        # Main body - wider, imposing shape
+        pts = [
+            (cx, cy - 24), (cx + 28, cy - 8),
+            (cx + 22, cy + 16), (cx - 22, cy + 16),
+            (cx - 28, cy - 8),
+        ]
+        pygame.draw.polygon(surface, col, pts)
+        pygame.draw.polygon(surface, GOLD, pts, 2)
+
+        # Central orb
+        orb_col = (255, 100, 0) if self.beam_state == self.STATE_BEAM_ACTIVE else (200, 150, 0)
+        pygame.draw.circle(surface, orb_col, (cx, cy), 8)
+
+        # Tractor beam
+        if self.beam_state in (self.STATE_BEAM_WARN, self.STATE_BEAM_ACTIVE):
+            bw = int(self.beam_width)
+            beam_surf = pygame.Surface((bw, HEIGHT - cy), pygame.SRCALPHA)
+            if self.beam_state == self.STATE_BEAM_WARN:
+                alpha = int(60 + 40 * math.sin(pygame.time.get_ticks() * 0.01))
+                beam_surf.fill((255, 200, 0, alpha))
+            else:
+                alpha = 100
+                beam_surf.fill((255, 180, 0, alpha))
+                # Capture progress indicator
+                if self.capture_progress > 0:
+                    prog = self.capture_progress / ARCHON_CAPTURE_TIME
+                    inner_alpha = int(60 + 140 * prog)
+                    beam_surf.fill((255, 255, 200, inner_alpha))
+            surface.blit(beam_surf, (int(self.beam_x) - bw // 2, cy + 20))
+
+        if self.spawn_timer > 0:
+            alpha = int(180 * self.spawn_timer)
+            s = pygame.Surface((70, 70), pygame.SRCALPHA)
+            pygame.draw.circle(s, (255, 200, 0, alpha), (35, 35), 35)
+            surface.blit(s, (cx - 35, cy - 35))
+
+        self._draw_hp_bar(surface, cx, cy)
+
+
+# ── Colossus Boss ─────────────────────────────────────────────────────────────
+
+class ColossusTurret:
+    """A destructible turret on the Colossus boss."""
+
+    def __init__(self, offset_x: float, offset_y: float, hp: int) -> None:
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.hp = hp
+        self.max_hp = hp
+        self.alive = True
+        self.flash_timer = 0.0
+        self.shoot_timer = random.uniform(0.5, 2.0)  # stagger initial shots
+        self.x = 0.0  # world position, updated by parent
+        self.y = 0.0
+
+    def take_damage(self, dmg: int = 1) -> bool:
+        self.hp -= dmg
+        self.flash_timer = 0.12
+        if self.hp <= 0:
+            self.alive = False
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface) -> None:
+        if not self.alive:
+            return
+        cx, cy = int(self.x), int(self.y)
+        flashing = self.flash_timer > 0
+        col = WHITE if flashing else (255, 100, 50)
+        pygame.draw.rect(surface, col, (cx - 10, cy - 10, 20, 20))
+        pygame.draw.rect(surface, ORANGE, (cx - 10, cy - 10, 20, 20), 2)
+        # Turret barrel
+        pygame.draw.rect(surface, (200, 80, 40), (cx - 3, cy + 10, 6, 8))
+        # Mini HP bar
+        ratio = self.hp / self.max_hp
+        bx, by = cx - 12, cy - 16
+        pygame.draw.rect(surface, (60, 60, 60), (bx, by, 24, 3))
+        bar_col = LIME if ratio > 0.5 else YELLOW if ratio > 0.25 else RED
+        pygame.draw.rect(surface, bar_col, (bx, by, int(24 * ratio), 3))
+
+
+class Colossus(_BossBase):
+    """Endgame boss with 4 destructible turrets and an invulnerable core."""
+
+    def __init__(self, wave: int) -> None:
+        boss_tier = wave // 20
+        turret_hp = COLOSSUS_TURRET_BASE_HP + boss_tier * COLOSSUS_TURRET_HP_SCALE
+        core_hp = COLOSSUS_CORE_BASE_HP + boss_tier * COLOSSUS_CORE_HP_SCALE
+        self._common_init(wave)
+        # Override HP with Colossus-specific core HP
+        self.max_hp = core_hp
+        self.hp = core_hp
+        self.boss_type = "Colossus"
+        self.speed = COLOSSUS_SPEED
+        self.direction = 1
+        self.w = COLOSSUS_WIDTH
+        self.h = COLOSSUS_HEIGHT
+        self.core_exposed = False
+        self.core_orb_timer = 0.0
+        self.boss_tier = boss_tier
+
+        # 4 turrets at corners
+        hw, hh = self.w // 2, self.h // 2
+        self.turrets = [
+            ColossusTurret(-hw + 15, -hh + 15, turret_hp),  # top-left
+            ColossusTurret(hw - 15, -hh + 15, turret_hp),   # top-right
+            ColossusTurret(-hw + 15, hh - 15, turret_hp),   # bottom-left
+            ColossusTurret(hw - 15, hh - 15, turret_hp),    # bottom-right
+        ]
+
+    @property
+    def turrets_alive(self) -> int:
+        return sum(1 for t in self.turrets if t.alive)
+
+    def should_shoot(self) -> bool:
+        return False  # Colossus handles shooting in update()
+
+    def take_damage(self, dmg: int = 1) -> None:
+        """Core only takes damage when exposed (all turrets destroyed)."""
+        if not self.core_exposed:
+            return
+        self.hp -= dmg
+        self.hit_flash = 0.12
+        if self.hp <= 0:
+            self.alive = False
+
+    def update(self, dt: float, player_x: float = 0, player_y: float = 0) -> list:
+        bullets = []
+        self.anim_timer += dt
+
+        # Flash timers
+        if self.hit_flash > 0:
+            self.hit_flash -= dt
+        for t in self.turrets:
+            if t.flash_timer > 0:
+                t.flash_timer -= dt
+
+        # Movement
+        self.x += self.speed * self.direction * dt
+        left_bound = self.w // 2 + 20
+        right_bound = WIDTH - self.w // 2 - 20
+        if self.x < left_bound:
+            self.x = left_bound
+            self.direction = 1
+        elif self.x > right_bound:
+            self.x = right_bound
+            self.direction = -1
+
+        # Update turret world positions
+        for t in self.turrets:
+            t.x = self.x + t.offset_x
+            t.y = self.y + t.offset_y
+
+        # Check if core is exposed
+        if not self.core_exposed and self.turrets_alive == 0:
+            self.core_exposed = True
+            self.y -= 20  # retreat upward slightly
+
+        alive_count = self.turrets_alive
+
+        # Turret shooting based on phase
+        for t in self.turrets:
+            if not t.alive:
+                continue
+            t.shoot_timer -= dt
+            if t.shoot_timer <= 0:
+                if alive_count == 4:
+                    # Crossfire: aimed at player, staggered
+                    t.shoot_timer = 2.0
+                    dx = player_x - t.x
+                    dy = player_y - t.y
+                    dist = max(1, math.hypot(dx, dy))
+                    bullets.append(EnemyBullet(
+                        x=t.x, y=t.y + 12,
+                        vx=dx / dist * 180,
+                        vy=dy / dist * 180,
+                    ))
+                elif alive_count == 3:
+                    # Sweeping beam: fire in arcs
+                    t.shoot_timer = 1.5
+                    sweep_angle = math.sin(self.anim_timer * 2) * 0.8
+                    bullets.append(EnemyBullet(
+                        x=t.x, y=t.y + 12,
+                        vx=math.sin(sweep_angle) * 200,
+                        vy=200,
+                    ))
+                elif alive_count == 2:
+                    # Rapid aimed
+                    t.shoot_timer = 1.0
+                    dx = player_x - t.x
+                    dy = player_y - t.y
+                    dist = max(1, math.hypot(dx, dy))
+                    bullets.append(EnemyBullet(
+                        x=t.x, y=t.y + 12,
+                        vx=dx / dist * 220,
+                        vy=dy / dist * 220,
+                    ))
+                elif alive_count == 1:
+                    # Desperate spiral
+                    t.shoot_timer = 0.3
+                    spiral_a = self.anim_timer * 4
+                    bullets.append(EnemyBullet(
+                        x=t.x, y=t.y + 12,
+                        vx=math.sin(spiral_a) * 160,
+                        vy=160,
+                    ))
+
+        # Core shooting when exposed
+        if self.core_exposed:
+            self.core_orb_timer -= dt
+            if self.core_orb_timer <= 0:
+                self.core_orb_timer = 2.0
+                dx = player_x - self.x
+                bullets.append(EnemyBullet(
+                    x=self.x, y=self.y + 20,
+                    vx=dx * 0.3,
+                    vy=120,
+                ))
+
+        return bullets
+
+    def draw(self, surface: pygame.Surface, offset: list[int] | None = None) -> None:
+        cx, cy = int(self.x), int(self.y)
+        hw, hh = self.w // 2, self.h // 2
+        flashing = self.hit_flash > 0
+
+        # Main hull
+        hull_col = WHITE if flashing else (100, 100, 120)
+        hull_rect = (cx - hw, cy - hh, self.w, self.h)
+        pygame.draw.rect(surface, hull_col, hull_rect, border_radius=8)
+        pygame.draw.rect(surface, (160, 160, 180), hull_rect, 3, border_radius=8)
+
+        # Armour plates
+        for plate_y in range(-hh + 20, hh - 10, 25):
+            pygame.draw.line(surface, (80, 80, 100),
+                             (cx - hw + 10, cy + plate_y),
+                             (cx + hw - 10, cy + plate_y), 1)
+
+        # Core
+        if self.core_exposed:
+            pulse = int(8 + 4 * math.sin(self.anim_timer * 5))
+            pygame.draw.circle(surface, (255, 50, 50), (cx, cy), pulse)
+            pygame.draw.circle(surface, (255, 200, 200), (cx, cy), pulse, 2)
+        else:
+            pygame.draw.circle(surface, (60, 60, 80), (cx, cy), 12)
+            pygame.draw.circle(surface, (100, 100, 130), (cx, cy), 12, 2)
+
+        # Turrets
+        for t in self.turrets:
+            t.draw(surface)
+
+        # Destroyed turret sparks
+        for t in self.turrets:
+            if not t.alive:
+                tx, ty = int(self.x + t.offset_x), int(self.y + t.offset_y)
+                if random.random() < 0.3:
+                    spark_col = random.choice([(255, 200, 50), (255, 100, 0), (200, 200, 200)])
+                    sx = tx + random.randint(-8, 8)
+                    sy = ty + random.randint(-8, 8)
+                    pygame.draw.circle(surface, spark_col, (sx, sy), random.randint(1, 3))
+
+        # HP bar (shows core HP when exposed, otherwise shows turret count)
+        bar_y = cy - hh - 14
+        bar_w = 80
+        bx = cx - bar_w // 2
+        if self.core_exposed:
+            ratio = self.hp / self.max_hp
+            pygame.draw.rect(surface, (60, 60, 60), (bx, bar_y, bar_w, 6))
+            col = RED
+            pygame.draw.rect(surface, col, (bx, bar_y, int(bar_w * ratio), 6))
+        else:
+            # Show turret count as segmented bar
+            seg_w = bar_w // 4
+            for i, t in enumerate(self.turrets):
+                sx = bx + i * seg_w
+                col = ORANGE if t.alive else (40, 40, 40)
+                pygame.draw.rect(surface, col, (sx + 1, bar_y, seg_w - 2, 6))
+
+
+# ── Weighted Power-Up Selection ───────────────────────────────────────────────
+
+class WeightedPowerUp(PowerUp):
+    """Power-up created with weighted random type selection."""
+
+    @staticmethod
+    def weighted_random_type(wave: int) -> str:
+        weights = POWERUP_WEIGHTS_LATE if wave >= 35 else POWERUP_WEIGHTS_EARLY
+        types = list(weights.keys())
+        w = list(weights.values())
+        return random.choices(types, weights=w, k=1)[0]
+
+
+# ── Solar Flare (Sector IV Hazard) ───────────────────────────────────────────
+
+class SolarFlare:
+    """Environmental hazard for Sector IV. A horizontal beam sweeps a Y-lane."""
+
+    STATE_IDLE = 0
+    STATE_WARNING = 1
+    STATE_ACTIVE = 2
+
+    def __init__(self) -> None:
+        self.state = self.STATE_IDLE
+        self.timer = 15.0  # first flare after 15s
+        self.target_y = 0.0
+        self.warn_duration = 2.0
+        self.active_duration = 0.5
+
+    def reset(self) -> None:
+        self.state = self.STATE_IDLE
+        self.timer = 15.0
+
+    def update(self, dt: float) -> None:
+        self.timer -= dt
+        if self.state == self.STATE_IDLE:
+            if self.timer <= 0:
+                self.state = self.STATE_WARNING
+                self.timer = self.warn_duration
+                self.target_y = random.uniform(150, HEIGHT - 100)
+        elif self.state == self.STATE_WARNING:
+            if self.timer <= 0:
+                self.state = self.STATE_ACTIVE
+                self.timer = self.active_duration
+        elif self.state == self.STATE_ACTIVE:
+            if self.timer <= 0:
+                self.state = self.STATE_IDLE
+                self.timer = 15.0
+
+    def is_hitting(self, x: float, y: float, radius: float = 12) -> bool:
+        """Check if a position is in the active flare beam."""
+        if self.state != self.STATE_ACTIVE:
+            return False
+        return abs(y - self.target_y) < 20 + radius
+
+    def draw(self, surface: pygame.Surface) -> None:
+        if self.state == self.STATE_IDLE:
+            return
+        ty = int(self.target_y)
+        if self.state == self.STATE_WARNING:
+            # Orange glow line
+            progress = 1 - self.timer / self.warn_duration
+            alpha = int(40 + 80 * progress)
+            warn_surf = pygame.Surface((WIDTH, 20), pygame.SRCALPHA)
+            warn_surf.fill((255, 150, 0, alpha))
+            surface.blit(warn_surf, (0, ty - 10))
+            # Pulsing outline
+            if int(progress * 8) % 2 == 0:
+                pygame.draw.line(surface, (255, 180, 0), (0, ty), (WIDTH, ty), 1)
+        elif self.state == self.STATE_ACTIVE:
+            # Full beam
+            beam_surf = pygame.Surface((WIDTH, 40), pygame.SRCALPHA)
+            beam_surf.fill((255, 200, 50, 180))
+            surface.blit(beam_surf, (0, ty - 20))
+            # Bright core
+            pygame.draw.line(surface, (255, 255, 200), (0, ty), (WIDTH, ty), 4)
+            # Edge glow
+            for offset in (-18, -12, 12, 18):
+                glow_alpha = 60
+                pygame.draw.line(surface, (255, 150, 0),
+                                 (0, ty + offset), (WIDTH, ty + offset), 1)
+
+
+# ── Bonus Round Enemy ─────────────────────────────────────────────────────────
+
+class BonusEnemy:
+    """Non-shooting enemy that flies a Bezier path during bonus rounds."""
+
+    def __init__(self, path_points: list[tuple[float, float]],
+                 speed: float = 200, delay: float = 0.0) -> None:
+        self.path = path_points  # list of (x, y) control points
+        self.speed = speed
+        self.delay = delay
+        self.t = 0.0  # progress along path (0 to 1)
+        self.alive = True
+        self.active = False  # not active until delay expires
+        self.x = path_points[0][0] if path_points else -50
+        self.y = path_points[0][1] if path_points else -50
+        self.size = 14
+        self.score = 100
+        self.colour = random.choice([CYAN, HOT_PINK, LIME, ORANGE, YELLOW])
+
+    def update(self, dt: float) -> None:
+        if not self.alive:
+            return
+        if self.delay > 0:
+            self.delay -= dt
+            return
+        self.active = True
+        # Advance along path
+        path_len = max(1, len(self.path) - 1)
+        self.t += (self.speed / (path_len * 120)) * dt
+        if self.t >= 1.0:
+            self.alive = False
+            return
+        # Interpolate position along path segments
+        seg = self.t * path_len
+        idx = int(seg)
+        frac = seg - idx
+        idx = min(idx, len(self.path) - 2)
+        ax, ay = self.path[idx]
+        bx, by = self.path[idx + 1]
+        self.x = ax + (bx - ax) * frac
+        self.y = ay + (by - ay) * frac
+
+    def draw(self, surface: pygame.Surface) -> None:
+        if not self.alive or not self.active:
+            return
+        cx, cy = int(self.x), int(self.y)
+        # Neon diamond shape
+        pts = [(cx, cy - self.size), (cx + self.size, cy),
+               (cx, cy + self.size), (cx - self.size, cy)]
+        pygame.draw.polygon(surface, self.colour, pts)
+        pygame.draw.polygon(surface, WHITE, pts, 1)
+        # Trail effect
+        trail_col = (*self.colour, 80) if len(self.colour) == 3 else self.colour
+        ts = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+        pygame.draw.circle(ts, trail_col if len(trail_col) == 4 else (*trail_col, 80),
+                           (self.size, self.size), self.size)
+        surface.blit(ts, (cx - self.size, cy - self.size))
+
+
 # ── Boss factory ───────────────────────────────────────────────────────────────
 
 def make_boss(wave: int) -> _BossBase:
@@ -920,7 +1867,12 @@ def make_boss(wave: int) -> _BossBase:
     Wave 15 → SwarmQueen
     Wave 20 → Phantom
     Wave 25 → Mothership (cycle repeats, scaling with wave)
+    Waves 50, 70, 90, 110... → Colossus (replaces normal rotation)
     """
+    # Colossus at wave 50 and every 20 waves thereafter
+    if wave >= 50 and wave % 20 == 10:
+        return Colossus(wave)
+
     boss_number = (wave // BOSS_WAVE_INTERVAL - 1) % 4
     if boss_number == 0:
         return Mothership(wave)
