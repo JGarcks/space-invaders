@@ -2239,7 +2239,7 @@ class Game:
             b.draw(self.screen)
 
         if self.bomb_flash_timer > 0:
-            alpha = int(200 * (self.bomb_flash_timer / 0.18))
+            alpha = min(255, int(200 * (self.bomb_flash_timer / 0.18)))
             flash = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             flash.fill((255, 200, 50, alpha))
             self.screen.blit(flash, (0, 0))
@@ -2565,7 +2565,7 @@ class Game:
             lbl = self.font_sm.render("LOCK-ON", True, (255, 180, 60))
             self.screen.blit(lbl, (bar_x, bar_y + bar_h + 2))
             # Flash "SURGE!" when bar is full
-            if lock_prog >= 1.0 and int(self.time * 6) % 2 == 0:
+            if lock_prog >= 1.0 and int(pygame.time.get_ticks() / 1000.0 * 6) % 2 == 0:
                 surge_txt = self.font_med.render("SURGE!", True, (255, 50, 50))
                 sr = surge_txt.get_rect(centerx=bar_x + bar_w // 2, y=bar_y - 28)
                 self.screen.blit(surge_txt, sr)

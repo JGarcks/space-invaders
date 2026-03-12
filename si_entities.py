@@ -1062,7 +1062,7 @@ class Sentinel(_HarbingerBase):
             pygame.draw.lines(surface, (0, 180, 255), False, shield_pts, 3)
 
         # Spawn shimmer
-        if self.spawn_timer > 0:
+        if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
             s = pygame.Surface((60, 60), pygame.SRCALPHA)
             pygame.draw.circle(s, (0, 200, 255, alpha), (30, 30), 30)
@@ -1148,7 +1148,7 @@ class Wraith(_HarbingerBase):
         pygame.draw.circle(surface, (255, 0, 200), (cx, cy), 5)
         pygame.draw.circle(surface, WHITE, (cx, cy), 2)
 
-        if self.spawn_timer > 0:
+        if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
             s = pygame.Surface((50, 50), pygame.SRCALPHA)
             pygame.draw.circle(s, (200, 0, 255, alpha), (25, 25), 25)
@@ -1465,7 +1465,7 @@ class Archon(_HarbingerBase):
                     beam_surf.fill((255, 255, 200, inner_alpha))
             surface.blit(beam_surf, (int(self.beam_x) - bw // 2, cy + 20))
 
-        if self.spawn_timer > 0:
+        if 0 < self.spawn_timer <= 1.0:
             alpha = int(180 * self.spawn_timer)
             s = pygame.Surface((70, 70), pygame.SRCALPHA)
             pygame.draw.circle(s, (255, 200, 0, alpha), (35, 35), 35)
