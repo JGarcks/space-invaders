@@ -43,10 +43,15 @@ from si_constants import (
     PRESSURE_PULSE_INTERVAL, PRESSURE_PULSE_DROP,
     PRESSURE_PULSE_BOOST, PRESSURE_PULSE_DURATION,
     SENTINEL_HP, WRAITH_HP, ARCHON_HP,
+    ENEMY_BULLET_SPEED_CAP, ENEMY_SHOOT_SCALING, ENEMY_SHOOT_FLOOR,
     SOLAR_FLARE_INTERVAL,
     BONUS_ROUND_INTERVAL, BONUS_ROUND_ENEMIES, BONUS_ROUND_SCORE,
-    BONUS_ROUND_PERFECT, BONUS_ROUND_DURATION,
-    BONUS_FRAG_RADIUS, BONUS_POWERUP_EVERY,
+    BONUS_ROUND_PERFECT, BONUS_ROUND_DURATION, BONUS_ROUND_SPEED,
+    BONUS_FRAG_RADIUS, BONUS_FRAG_RADIUS_MEGA, BONUS_POWERUP_EVERY,
+    BONUS_FRAG_CHAIN_DEPTH, BONUS_PARTICLE_MULT,
+    SENTINEL_INTRO_HP, SENTINEL_FULL_WAVE, SENTINEL_INTRO_WAVE,
+    LEVIATHAN_INTRO_WAVE, WRAITH_INTRO_WAVE, ARCHON_INTRO_WAVE,
+    HARBINGER_FIRST_WAVE,
     GRAZE_DISTANCE, GRAZE_INNER_DISTANCE, GRAZE_POINTS,
     PROXIMITY_KILL_DISTANCE, PROXIMITY_KILL_MULT,
     POWERUP_WEIGHTS_EARLY, POWERUP_WEIGHTS_LATE, PowerUpKindEx,
@@ -286,6 +291,7 @@ class Game:
         self.bonus_round_enemies: list[BonusEnemy] = []
         self.bonus_round_killed: int = 0
         self.bonus_round_timer: float = 0.0
+        self._bonus_total: int = BONUS_ROUND_ENEMIES
 
         # ── Graze Scoring ────────────────────────────────────────────────────
         self.graze_count: int = 0
@@ -359,7 +365,7 @@ class Game:
         else:
             y_offset = min((self.wave - 1) * 8, 100)
             rows     = min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
-            alien_hp = min(3, 1 + (self.wave - 1) // 20)
+            alien_hp = min(5, 1 + (self.wave - 1) // 15)
             for row in range(rows):
                 # Sprite tier: top rows=squid(0), mid=crab(1), bottom=octopus(2)
                 sprite_tier = min(2, row // 2)
@@ -377,14 +383,16 @@ class Game:
         raw_speed = ALIEN_START_SPEED * (1 + 0.010 * (self.wave - 1)) * diff["speed"]
         self.alien_speed = min(raw_speed, 340)
         self.enemy_shoot_interval = max(
-            0.55, (ENEMY_SHOOT_INTERVAL - 0.09 * (self.wave - 1)) / diff["fire_rate"]
+            ENEMY_SHOOT_FLOOR,
+            (ENEMY_SHOOT_INTERVAL - ENEMY_SHOOT_SCALING * (self.wave - 1))
+            / diff["fire_rate"],
         )
         self.enemy_bullet_speed = min(
-            450, (ENEMY_BULLET_SPEED + 10 * (self.wave - 1)) * diff["bullet_speed"]
+            ENEMY_BULLET_SPEED_CAP,
+            (ENEMY_BULLET_SPEED + 10 * (self.wave - 1)) * diff["bullet_speed"],
         )
-        # Drop rate rebalance: higher cap past wave 40
-        drop_cap = 0.28 if self.wave >= 40 else 0.22
-        self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, drop_cap)
+        # Power-up drop rate scales with wave, single cap
+        self.powerup_drop_chance  = min(diff["powerup"] + self.wave * 0.003, 0.22)
         # Power-up duration scales with wave
         self.powerup_duration = min(8, 5 + (self.wave - 1) // 20)
         self.current_alien_drop   = min(40, ALIEN_DROP + self.wave // 3)
@@ -400,11 +408,10 @@ class Game:
         self.dive_bombers = []
         self.galaga_divers = []
         self.galaga_kill_counter = 0
-        # Faster divers past wave 50
-        if self.wave > 50:
-            self.dive_timer = random.uniform(6.0, 12.0)
-        else:
-            self.dive_timer = random.uniform(DIVE_INTERVAL_MIN, DIVE_INTERVAL_MAX)
+        # Dive interval scales gradually with wave
+        dive_min = max(5.0, 12.0 - self.wave * 0.14)
+        dive_max = max(10.0, 20.0 - self.wave * 0.20)
+        self.dive_timer = random.uniform(dive_min, dive_max)
         self.wave_kills   = 0
         self.last_stand_active = False
         self.pressure_pulse_timer  = PRESSURE_PULSE_INTERVAL
@@ -426,8 +433,8 @@ class Game:
         if self.dual_fighter and self.wave != self.dual_fighter_wave:
             self.dual_fighter = False
 
-        # ── Spawn Harbinger elites (non-boss waves 35+) ─────────────────
-        if self.wave >= 35 and self.boss is None:
+        # ── Spawn Harbinger elites (non-boss waves) ──────────────────────
+        if self.wave >= HARBINGER_FIRST_WAVE and self.boss is None:
             self._spawn_harbingers()
 
         # Detect active synergies
@@ -446,37 +453,62 @@ class Game:
                 barrier.regen_blocks()
 
     def _spawn_harbingers(self) -> None:
-        """Spawn Harbinger elite enemies based on wave number."""
+        """Spawn Harbinger elite enemies based on wave number.
+
+        Gradual introduction: Sentinel appears first at SENTINEL_INTRO_WAVE
+        with reduced HP and no swoop, then at full power from SENTINEL_FULL_WAVE.
+        Leviathan moved to wave 52 to stagger from Colossus at 50.
+        """
         w = self.wave
         spawns: list[type] = []
 
         if w >= 65:
             spawns = [Sentinel, Sentinel, Wraith, Leviathan, Leviathan, Archon]
-        elif w >= 55:
+        elif w >= ARCHON_INTRO_WAVE:
             spawns = [Sentinel, Wraith, Leviathan, Leviathan, Archon]
-        elif w >= 50:
+        elif w >= LEVIATHAN_INTRO_WAVE:
             spawns = [Sentinel, Wraith, Leviathan, Archon]
         elif w >= 45:
             spawns = [Sentinel, Sentinel, Wraith, Leviathan]
-        elif w >= 40:
+        elif w >= WRAITH_INTRO_WAVE:
             spawns = [Sentinel, Wraith]
-        elif w >= 35:
+        elif w >= SENTINEL_FULL_WAVE:
             spawns = [Sentinel]
+        elif w >= SENTINEL_INTRO_WAVE:
+            spawns = [Sentinel]  # intro version (handled below)
+
+        # HP scaling: harbingers get +2 HP every 10 waves past 35
+        hp_bonus = max(0, (w - 35) // 10 * 2)
 
         for i, cls in enumerate(spawns):
             x = 100 + (WIDTH - 200) * (i + 1) / (len(spawns) + 1)
             y = 60 + random.uniform(-10, 10)
-            self.harbingers.append(cls(x, y))
+            harb = cls(x, y)
+            # Apply wave-based HP scaling
+            harb.hp += hp_bonus
+            harb.max_hp = harb.hp
+            # Intro Sentinel: reduced HP, disable swoop
+            if (cls is Sentinel and w < SENTINEL_FULL_WAVE):
+                harb.hp = SENTINEL_INTRO_HP + hp_bonus
+                harb.max_hp = harb.hp
+                harb._swoop_enabled = False
+            self.harbingers.append(harb)
 
     def _start_bonus_round(self) -> None:
         """Start a Galaga-style bonus round."""
+        tier = self.wave // BONUS_ROUND_INTERVAL  # 1 at wave 25, 2 at 50, etc.
+        num_enemies = BONUS_ROUND_ENEMIES + (tier - 1) * 40
+        bonus_speed = BONUS_ROUND_SPEED + (tier - 1) * 50
+        bonus_duration = BONUS_ROUND_DURATION + (tier - 1) * 5
+
         self.bonus_round_active = True
         self.bonus_round_killed = 0
-        self.bonus_round_timer = BONUS_ROUND_DURATION
+        self.bonus_round_timer = bonus_duration
         self.bonus_round_enemies = []
+        self._bonus_total = num_enemies
 
         # Create enemies on choreographed paths
-        for i in range(BONUS_ROUND_ENEMIES):
+        for i in range(num_enemies):
             delay = i * 0.10
             pattern = i % 4
             path: list[tuple[float, float]] = []
@@ -509,7 +541,18 @@ class Game:
                     py = 150 + 200 * math.sin(2.5 * math.pi * t)
                     path.append((px, py))
 
-            self.bonus_round_enemies.append(BonusEnemy(path, speed=250, delay=delay))
+            self.bonus_round_enemies.append(BonusEnemy(path, speed=bonus_speed, delay=delay))
+
+        # Auto-activate power-ups for the bonus round duration
+        self.active_powerups["rapid"] = bonus_duration
+        self.active_powerups["spread"] = bonus_duration
+        self.active_powerups["overcharge"] = bonus_duration
+
+        # Auto-activate frenzy tier 1 immediately for bonus round music
+        if self.frenzy_tier < 1:
+            self.frenzy_tier = 1
+            self.frenzy_banner_timer = FRENZY_BANNER_DURATION
+            self.frenzy_banner_tier = 1
 
         self.banners.append(AchievementBanner("BONUS ROUND!", self.font_sm))
         self.enemy_bullets = []
@@ -629,9 +672,13 @@ class Game:
 
     def _frenzy_kill(self) -> None:
         self.frenzy_streak += 1
+        # Scale thresholds down with alien HP so frenzy stays achievable
+        # when enemies take multiple hits to kill
+        cur_hp = min(5, 1 + (self.wave - 1) // 15)
+        hp_scale = max(1, cur_hp)
         new_tier = 0
         for i, td in enumerate(FRENZY_TIERS):
-            if self.frenzy_streak >= td["threshold"]:
+            if self.frenzy_streak >= max(3, td["threshold"] // hp_scale):
                 new_tier = i + 1
         if new_tier > self.frenzy_tier:
             self.frenzy_tier         = new_tier
@@ -959,7 +1006,10 @@ class Game:
                       if self.frenzy_tier > 0 else YELLOW)
 
         self.shoot_cooldown = max(0.0, self.shoot_cooldown - dt)
-        if keys[pygame.K_SPACE] and self.shoot_cooldown <= 0:
+        can_fire = keys[pygame.K_SPACE]
+        if self.bonus_round_active:
+            can_fire = True  # Auto-fire during bonus rounds
+        if can_fire and self.shoot_cooldown <= 0:
             base_cd = RAPID_SHOOT_COOLDOWN if has_rapid else BASE_SHOOT_COOLDOWN
             self.shoot_cooldown = base_cd * frenzy_mult
             self.sfx.play("pew")
@@ -1108,10 +1158,14 @@ class Game:
                 and not getattr(self, 'last_stand_active', False)):
             self.pressure_pulse_timer -= dt
             if self.pressure_pulse_timer <= 0:
-                self.pressure_pulse_timer = PRESSURE_PULSE_INTERVAL
+                # Pulse interval, drop, and duration scale with wave
+                pulse_interval = max(12.0, PRESSURE_PULSE_INTERVAL - self.wave * 0.08)
+                pulse_drop = min(40, PRESSURE_PULSE_DROP + int(self.wave * 0.16))
+                pulse_dur = min(8.0, PRESSURE_PULSE_DURATION + self.wave * 0.03)
+                self.pressure_pulse_timer = pulse_interval
                 for a in self.aliens:
-                    a.base_y = min(a.base_y + PRESSURE_PULSE_DROP, BARRIER_Y - 100)
-                self.pressure_pulse_active = PRESSURE_PULSE_DURATION
+                    a.base_y = min(a.base_y + pulse_drop, BARRIER_Y - 100)
+                self.pressure_pulse_active = pulse_dur
                 self._add_shake(8, 0.3)
                 self.bomb_flash_timer = 0.4
                 self.combo_popups.append(ComboPopup(
@@ -1121,9 +1175,10 @@ class Game:
             self.pressure_pulse_active -= dt
             # Apply boost against the BASE interval, not the current one
             # so the rate restores correctly once the pulse expires
+            pulse_boost = min(3.0, PRESSURE_PULSE_BOOST + self.wave * 0.01)
             self.enemy_shoot_interval = max(
-                0.35,
-                self._base_shoot_interval / PRESSURE_PULSE_BOOST,
+                ENEMY_SHOOT_FLOOR,
+                self._base_shoot_interval / pulse_boost,
             )
         else:
             # Restore to base interval when pulse not active
@@ -1319,9 +1374,11 @@ class Game:
             self.bonus_round_enemies = [be for be in self.bonus_round_enemies if be.alive]
             # Check if bonus round is over
             if self.bonus_round_timer <= 0 or not self.bonus_round_enemies:
-                perfect = self.bonus_round_killed >= BONUS_ROUND_ENEMIES
+                perfect = self.bonus_round_killed >= self._bonus_total
+                tier = self.wave // BONUS_ROUND_INTERVAL
+                perfect_bonus = BONUS_ROUND_PERFECT + (tier - 1) * 5000
                 if perfect:
-                    self.score += BONUS_ROUND_PERFECT
+                    self.score += perfect_bonus
                     self.banners.append(AchievementBanner("PERFECT!", self.font_sm))
                     self.sfx.play("achieve")
                 self.bonus_round_active = False
@@ -1348,15 +1405,15 @@ class Game:
                     WHITE, speed=80, size=2, life=0.15,
                 ))
 
-        # ── Reinforcement waves (wave 50+, every 3rd non-boss wave) ─────
-        if (self.wave > 50 and not self.reinforcement_sent
+        # ── Reinforcement waves (wave 47+, every 3rd non-boss wave) ─────
+        if (self.wave > 47 and not self.reinforcement_sent
                 and self.wave % BOSS_WAVE_INTERVAL != 0
-                and (self.wave - 51) % 3 == 0 and self.aliens):
+                and (self.wave - 48) % 3 == 0 and self.aliens):
             initial_count = (min(ALIEN_ROWS_MAX, ALIEN_ROWS + (self.wave - 1) // 8)
                              * ALIEN_COLS)
             if len(self.aliens) < initial_count * 0.5:
                 self.reinforcement_sent = True
-                alien_hp = min(3, 1 + (self.wave - 1) // 20)
+                alien_hp = min(5, 1 + (self.wave - 1) // 15)
                 y_offset = min((self.wave - 1) * 8, 100)
                 for row in range(3):
                     sprite_tier = min(2, row // 2)
@@ -1912,17 +1969,31 @@ class Game:
                         bullets_hit.add(bi)
                         self.bonus_round_killed += 1
                         self.score += BONUS_ROUND_SCORE
-                        self._spawn_explosion(be.x, be.y, be.colour, count=18)
+                        self._spawn_explosion(be.x, be.y, be.colour, count=36)
                         self.sfx.play("explode")
-                        # Frag chain: kill nearby bonus enemies (1-level only)
+                        # Level 1 chain kills (mega radius)
+                        chain_killed = []
                         for other in self.bonus_round_enemies:
                             if not other.alive or not other.active or other is be:
                                 continue
-                            if math.hypot(be.x - other.x, be.y - other.y) < BONUS_FRAG_RADIUS:
+                            if math.hypot(be.x - other.x, be.y - other.y) < BONUS_FRAG_RADIUS_MEGA:
                                 other.alive = False
+                                chain_killed.append(other)
                                 self.bonus_round_killed += 1
                                 self.score += BONUS_ROUND_SCORE
-                                self._spawn_explosion(other.x, other.y, other.colour, count=12)
+                                self._spawn_explosion(other.x, other.y, other.colour, count=24)
+                        # Level 2 chain kills
+                        level2_count = 0
+                        for ck in chain_killed:
+                            for other2 in self.bonus_round_enemies:
+                                if not other2.alive or not other2.active:
+                                    continue
+                                if math.hypot(ck.x - other2.x, ck.y - other2.y) < BONUS_FRAG_RADIUS_MEGA:
+                                    other2.alive = False
+                                    level2_count += 1
+                                    self.bonus_round_killed += 1
+                                    self.score += BONUS_ROUND_SCORE
+                                    self._spawn_explosion(other2.x, other2.y, other2.colour, count=16)
                         # Drop power-up every N kills
                         if self.bonus_round_killed % BONUS_POWERUP_EVERY == 0:
                             pu_kind = WeightedPowerUp.weighted_random_type(self.wave)
@@ -2118,6 +2189,10 @@ class Game:
                 self.sector_transition_name = sd["name"]
                 self.sector_transition_sub  = sd["subtitle"]
                 self.sector_transition_timer = SECTOR_TRANSITION_DURATION
+            # Harbinger warning banner a few waves before they first appear
+            if self.wave == 30:
+                self.banners.append(
+                    AchievementBanner("ELITE FORCES INCOMING!", self.font_sm))
             if self.wave == 5:
                 self._try_achievement("Wave 5")
             if self.wave == 10:
@@ -2358,11 +2433,21 @@ class Game:
             txt = self.font_sm.render("No scores yet!", True, DIM_WHITE)
             self.screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 596))
 
-        ctrl = self.font_xs.render(
-            "A/D or Arrows = Move  |  Space = Shoot  |  P = Pause  |  "
-            "C = CRT  |  ESC = Quit",
+        # ── Controls panel for new players ──────────────────────────────
+        ctrl_y = HEIGHT - 70
+        ctrl_title = self.font_sm.render("CONTROLS", True, CYAN)
+        self.screen.blit(ctrl_title,
+                         (WIDTH // 2 - ctrl_title.get_width() // 2, ctrl_y))
+        ctrl_line1 = self.font_xs.render(
+            "A / D  or  Arrow Keys = Move   |   Space = Shoot   |   P = Pause",
             True, DIM_WHITE)
-        self.screen.blit(ctrl, (WIDTH // 2 - ctrl.get_width() // 2, HEIGHT - 30))
+        ctrl_line2 = self.font_xs.render(
+            "Left / Right = Cycle Ship   |   Up / Down = Difficulty   |   ESC = Quit",
+            True, DIM_WHITE)
+        self.screen.blit(ctrl_line1,
+                         (WIDTH // 2 - ctrl_line1.get_width() // 2, ctrl_y + 22))
+        self.screen.blit(ctrl_line2,
+                         (WIDTH // 2 - ctrl_line2.get_width() // 2, ctrl_y + 40))
 
         if self.konami_pending:
             kn = self.font_sm.render("★ CHEAT MODE ARMED — Press ENTER ★", True, GOLD)
@@ -2470,7 +2555,7 @@ class Game:
                 be.draw(self.screen)
             # Bonus round HUD
             br_txt = self.font_sm.render(
-                f"BONUS: {self.bonus_round_killed}/{BONUS_ROUND_ENEMIES}  "
+                f"BONUS: {self.bonus_round_killed}/{self._bonus_total}  "
                 f"TIME: {max(0, self.bonus_round_timer):.1f}s",
                 True, GOLD)
             self.screen.blit(br_txt, (WIDTH // 2 - br_txt.get_width() // 2, 20))

@@ -42,7 +42,7 @@ from si_constants import (
     ARCHON_SHOOT_INTERVAL,
     ARCHON_ORBIT_SPEED, ARCHON_ORBIT_VERT_AMP, ARCHON_BEAM_DRIFT_SPEED,
     COLOSSUS_TURRET_BASE_HP, COLOSSUS_TURRET_HP_SCALE,
-    COLOSSUS_CORE_BASE_HP, COLOSSUS_CORE_HP_SCALE, COLOSSUS_SPEED,
+    COLOSSUS_CORE_BASE_HP, COLOSSUS_CORE_HP_SCALE, COLOSSUS_SPEED, COLOSSUS_FIRST_WAVE,
     COLOSSUS_TURRET_SCORE, COLOSSUS_WIDTH, COLOSSUS_HEIGHT,
     HOMING_BULLET_TRACKING,
 )
@@ -669,7 +669,7 @@ class Dreadnought(_BossBase):
         self.shield_angle  = 0.0          # current gap start (radians)
         self.shield_speed  = 1.1          # rad/s rotation
         boss_tier          = max(1, wave // BOSS_WAVE_INTERVAL)
-        self.gap_size      = math.pi * 0.45 - boss_tier * 0.02  # narrows with tier
+        self.gap_size      = math.pi * 0.60 - boss_tier * 0.02  # wider gap for fairness
         self._glow_surf = pygame.Surface((300, 150), pygame.SRCALPHA)
 
     # ------------------------------------------------------------------
@@ -1026,6 +1026,7 @@ class Sentinel(_HarbingerBase):
         self.swoop_timer = SENTINEL_SWOOP_INTERVAL
         self.swoop_state = self._SWOOP_NONE
         self.swoop_target_x = x
+        self._swoop_enabled = True  # can be disabled for intro Sentinels
         self._spawn_shimmer_surf = pygame.Surface((60, 60), pygame.SRCALPHA)
 
     def update(self, dt: float, player_x: float = 0.0) -> list:
@@ -1041,8 +1042,8 @@ class Sentinel(_HarbingerBase):
             elif self.x > WIDTH - 60:
                 self.x = WIDTH - 60
                 self.direction = -1
-            # Countdown to next swoop
-            if self.spawn_timer <= 0:
+            # Countdown to next swoop (only if swoop is enabled)
+            if self.spawn_timer <= 0 and self._swoop_enabled:
                 self.swoop_timer -= dt
                 if self.swoop_timer <= 0:
                     self.swoop_state = self._SWOOP_DIVING
@@ -1614,6 +1615,9 @@ class Colossus(_BossBase):
         boss_tier = wave // 20
         turret_hp = COLOSSUS_TURRET_BASE_HP + boss_tier * COLOSSUS_TURRET_HP_SCALE
         core_hp = COLOSSUS_CORE_BASE_HP + boss_tier * COLOSSUS_CORE_HP_SCALE
+        # First Colossus (wave 50) has 20% reduced core HP for gentler intro
+        if wave == COLOSSUS_FIRST_WAVE:
+            core_hp = int(core_hp * 0.80)
         self._common_init(wave)
         # Override HP with Colossus-specific core HP
         self.max_hp = core_hp

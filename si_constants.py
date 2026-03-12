@@ -85,8 +85,11 @@ ALIEN_X_START, ALIEN_Y_START   = 510, 140
 ALIEN_X_SPACING, ALIEN_Y_SPACING = 100, 72
 
 # ── Enemy bullets ─────────────────────────────────────────────────────────────
-ENEMY_BULLET_SPEED   = 450
-ENEMY_SHOOT_INTERVAL = 1.4
+ENEMY_BULLET_SPEED       = 280       # base speed (was 450); scales with wave
+ENEMY_BULLET_SPEED_CAP   = 520       # ceiling (was 450, same as base = no scaling)
+ENEMY_SHOOT_INTERVAL     = 1.4
+ENEMY_SHOOT_SCALING      = 0.03      # seconds removed per wave (was 0.09 — hit floor at wave 11)
+ENEMY_SHOOT_FLOOR        = 0.35      # minimum interval in seconds (was 0.55)
 
 # ── Combo system ──────────────────────────────────────────────────────────────
 COMBO_WINDOW = 1.5
@@ -105,7 +108,7 @@ POWERUP_LABELS: dict[str, str] = {
 }
 
 # ── Extra-life milestones ─────────────────────────────────────────────────────
-EXTRA_LIFE_MILESTONES = [1000, 3000, 7000, 15000, 30000]
+EXTRA_LIFE_MILESTONES = [1000, 3000, 7000, 15000, 30000, 60000, 100000, 175000]
 
 # ── UFO ───────────────────────────────────────────────────────────────────────
 UFO_SPEED        = 380
@@ -168,7 +171,7 @@ UPGRADE_POOL: list[dict] = [
 DIFFICULTIES = ["Easy", "Normal", "Hard"]
 DIFFICULTY_SETTINGS: dict[str, dict[str, float]] = {
     "Easy":   {"speed": 0.70, "fire_rate": 0.60, "powerup": 0.10, "bullet_speed": 0.70},
-    "Normal": {"speed": 1.00, "fire_rate": 1.00, "powerup": 0.06, "bullet_speed": 1.00},
+    "Normal": {"speed": 1.00, "fire_rate": 1.00, "powerup": 0.08, "bullet_speed": 1.00},
     "Hard":   {"speed": 1.40, "fire_rate": 1.50, "powerup": 0.04, "bullet_speed": 1.30},
 }
 
@@ -290,10 +293,12 @@ PRESSURE_PULSE_BOOST    = 2.0    # enemy fire-rate multiplier during pulse
 PRESSURE_PULSE_DURATION = 5.0    # seconds the fire-rate boost lasts
 
 # ── Harbinger Elite Squadron ─────────────────────────────────────────────────
-HARBINGER_FIRST_WAVE = 35
+HARBINGER_FIRST_WAVE = 32  # first (weaker) sentinel at wave 32; full power at 35
 
 # Sentinel
-SENTINEL_INTRO_WAVE     = 35
+SENTINEL_INTRO_WAVE     = 32   # first appearance (reduced HP, no swoop)
+SENTINEL_FULL_WAVE      = 35   # full power (swoop enabled)
+SENTINEL_INTRO_HP       = 6    # HP at first intro wave
 SENTINEL_HP             = 10
 SENTINEL_SCORE          = 200
 SENTINEL_SPEED          = 120     # px/s horizontal patrol
@@ -319,7 +324,7 @@ WRAITH_MISSILE_LIFETIME = 3.0
 WRAITH_SHOOT_INTERVAL   = 2.0
 
 # Leviathan
-LEVIATHAN_INTRO_WAVE    = 50
+LEVIATHAN_INTRO_WAVE    = 52   # staggered from Colossus at wave 50
 LEVIATHAN_HEAD_HP       = 5
 LEVIATHAN_SEGMENT_HP    = 2
 LEVIATHAN_SEGMENTS      = 4      # body segments (total = 1 head + N body)
@@ -406,12 +411,16 @@ SOLAR_FLARE_BEAM_HEIGHT = 40     # pixels tall
 
 # ── Bonus Round ─────────────────────────────────────────────────────────────
 BONUS_ROUND_INTERVAL   = 25      # every 25 waves
-BONUS_ROUND_ENEMIES    = 160
+BONUS_ROUND_ENEMIES    = 160     # base count; scales with wave tier
 BONUS_ROUND_SCORE      = 100     # per enemy
-BONUS_ROUND_PERFECT    = 10000   # perfect bonus
-BONUS_ROUND_DURATION   = 30.0    # seconds
-BONUS_FRAG_RADIUS      = 75.0    # pixels — chain-kill radius on explosion
-BONUS_POWERUP_EVERY    = 5       # drop a power-up every N kills
+BONUS_ROUND_PERFECT    = 10000   # base perfect bonus; scales with wave tier
+BONUS_ROUND_DURATION   = 30.0    # base seconds; scales with wave tier
+BONUS_ROUND_SPEED      = 250     # base enemy speed; scales with wave tier
+BONUS_FRAG_RADIUS      = 75.0    # normal frag radius
+BONUS_FRAG_RADIUS_MEGA = 120.0   # larger radius used during bonus rounds
+BONUS_POWERUP_EVERY    = 3       # drop a power-up every N kills (was 5)
+BONUS_FRAG_CHAIN_DEPTH = 2       # chain reactions allowed (was 1 outside bonus)
+BONUS_PARTICLE_MULT    = 2       # explosion particle multiplier during bonus
 
 # ── Graze Scoring ───────────────────────────────────────────────────────────
 GRAZE_DISTANCE         = 15      # pixels (outer threshold)
