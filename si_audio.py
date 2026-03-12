@@ -97,6 +97,29 @@ def _make_layered_explosion(volume: float = 0.25) -> pygame.mixer.Sound:
     return sound
 
 
+def _make_machinegun_sfx(volume: float = 0.18) -> pygame.mixer.Sound:
+    """Short punchy burst: filtered noise + low square for a retro machinegun feel."""
+    sample_rate = 44100
+    duration_ms = 45
+    n_samples = int(sample_rate * duration_ms / 1000)
+    buf = array("h", [0] * n_samples)
+    max_amp = int(32767 * volume)
+    for i in range(n_samples):
+        t = i / sample_rate
+        p = i / n_samples
+        # Sharp exponential decay envelope
+        env = math.exp(-12 * p)
+        # Noise component (70%)
+        noise = random.uniform(-1, 1) * 0.7
+        # Low square wave punch at 110 Hz (30%)
+        square = (0.3 if math.sin(2 * math.pi * 110 * t) >= 0 else -0.3)
+        val = int(max_amp * (noise + square) * env)
+        buf[i] = max(-32768, min(32767, val))
+    sound = pygame.mixer.Sound(buffer=buf)
+    sound.set_volume(volume)
+    return sound
+
+
 def _make_level_up_sfx(volume: float = 0.25) -> pygame.mixer.Sound:
     sample_rate = 44100
     notes = [523.25, 659.25, 783.99, 1046.50]
@@ -472,7 +495,7 @@ class SoundManager:
     """
 
     _MAKERS: dict[str, Callable[[], pygame.mixer.Sound]] = {
-        "pew":         lambda: _make_sound(880, 80, 0.15, "square"),
+        "pew":         lambda: _make_machinegun_sfx(0.18),
         "explode":     lambda: _make_layered_explosion(0.25),
         "powerup":     lambda: _make_sweep(400, 1200, 200, 0.25),
         "achieve":     lambda: _make_sweep(600, 1400, 300, 0.2),

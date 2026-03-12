@@ -976,6 +976,11 @@ class _HarbingerBase:
 class Sentinel(_HarbingerBase):
     """Rotating-shield elite. Player must shoot through the gap."""
 
+    # Swoop states
+    _SWOOP_NONE = 0
+    _SWOOP_DIVING = 1
+    _SWOOP_RETURNING = 2
+
     def __init__(self, x: float, y: float) -> None:
         super().__init__(x, y, SENTINEL_HP, SENTINEL_SCORE)
         self.speed = SENTINEL_SPEED
@@ -986,17 +991,52 @@ class Sentinel(_HarbingerBase):
         self.shield_radius = SENTINEL_SHIELD_RADIUS
         self.shoot_timer = SENTINEL_SHOOT_INTERVAL
         self.size = 24  # collision radius
+        # Swoop state
+        self.base_y = y
+        self.swoop_timer = 5.0
+        self.swoop_state = self._SWOOP_NONE
+        self.swoop_target_x = x
 
-    def update(self, dt: float) -> list:
+    def update(self, dt: float, player_x: float = 0.0) -> list:
         self._update_base(dt)
-        # Horizontal patrol
-        self.x += self.speed * self.direction * dt
-        if self.x < 60:
-            self.x = 60
-            self.direction = 1
-        elif self.x > WIDTH - 60:
-            self.x = WIDTH - 60
-            self.direction = -1
+
+        # Swoop logic
+        if self.swoop_state == self._SWOOP_NONE:
+            # Normal horizontal patrol
+            self.x += self.speed * self.direction * dt
+            if self.x < 60:
+                self.x = 60
+                self.direction = 1
+            elif self.x > WIDTH - 60:
+                self.x = WIDTH - 60
+                self.direction = -1
+            # Countdown to next swoop
+            if self.spawn_timer <= 0:
+                self.swoop_timer -= dt
+                if self.swoop_timer <= 0:
+                    self.swoop_state = self._SWOOP_DIVING
+                    self.swoop_target_x = player_x
+        elif self.swoop_state == self._SWOOP_DIVING:
+            # Dive toward player column and 120px lower
+            target_y = self.base_y + 180
+            dx = self.swoop_target_x - self.x
+            dy = target_y - self.y
+            dist = math.hypot(dx, dy)
+            dive_speed = self.speed * 2
+            if dist < 8:
+                self.swoop_state = self._SWOOP_RETURNING
+            else:
+                self.x += (dx / dist) * dive_speed * dt
+                self.y += (dy / dist) * dive_speed * dt
+        elif self.swoop_state == self._SWOOP_RETURNING:
+            # Return to patrol height
+            dy = self.base_y - self.y
+            if abs(dy) < 6:
+                self.y = self.base_y
+                self.swoop_state = self._SWOOP_NONE
+                self.swoop_timer = 5.0
+            else:
+                self.y += math.copysign(self.speed * 1.5, dy) * dt
 
         # Shield rotation speeds up below 50% HP
         spd = SENTINEL_SHIELD_SPEED_P2 if self.hp < self.max_hp * 0.5 else SENTINEL_SHIELD_SPEED
@@ -1291,6 +1331,10 @@ class Leviathan(_HarbingerBase):
             self.x = WIDTH - 80
             self.direction = -1
 
+        # Slow vertical descent — creates urgency
+        if self.y < 500:
+            self.y += 12 * dt
+
         # Sinusoidal bob
         self.bob_time += LEVIATHAN_BOB_FREQ * dt
         base_y = self.y
@@ -1368,19 +1412,27 @@ class Archon(_HarbingerBase):
         self.shoot_timer = ARCHON_SHOOT_INTERVAL
         self.size = 28
         self.beam_width = 8  # starts narrow during warning
+        # Figure-8 orbit state
+        self.orbit_time = 0.0
+        self.center_x = x
+        self.base_y = y
+        self.orbit_rx = min(220, (WIDTH - 160) / 2)  # horizontal radius
 
     def update(self, dt: float, player_x: float, player_y: float) -> list:
         self._update_base(dt)
         bullets = []
 
-        # Horizontal patrol
-        self.x += self.speed * self.direction * dt
-        if self.x < 80:
-            self.x = 80
-            self.direction = 1
-        elif self.x > WIDTH - 80:
-            self.x = WIDTH - 80
-            self.direction = -1
+        # Figure-8 Lissajous orbit
+        self.orbit_time += 0.55 * dt  # faster orbit
+        self.x = self.center_x + math.sin(self.orbit_time) * self.orbit_rx
+        self.y = self.base_y + math.sin(2 * self.orbit_time) * 90
+        # Clamp to screen
+        self.x = max(80, min(WIDTH - 80, self.x))
+
+        # During beam phase: gently drift toward player X
+        if self.beam_state in (self.STATE_BEAM_WARN, self.STATE_BEAM_ACTIVE):
+            drift = math.copysign(min(45, abs(player_x - self.beam_x)), player_x - self.beam_x) * dt
+            self.beam_x += drift
 
         # Beam state machine
         self.beam_timer -= dt

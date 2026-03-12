@@ -46,6 +46,7 @@ from si_constants import (
     SOLAR_FLARE_INTERVAL,
     BONUS_ROUND_INTERVAL, BONUS_ROUND_ENEMIES, BONUS_ROUND_SCORE,
     BONUS_ROUND_PERFECT, BONUS_ROUND_DURATION,
+    BONUS_FRAG_RADIUS, BONUS_POWERUP_EVERY,
     GRAZE_DISTANCE, GRAZE_POINTS, PROXIMITY_KILL_DISTANCE, PROXIMITY_KILL_MULT,
     POWERUP_WEIGHTS_EARLY, POWERUP_WEIGHTS_LATE, PowerUpKindEx,
     SYNERGY_DEFINITIONS,
@@ -470,7 +471,7 @@ class Game:
 
         # Create enemies on choreographed paths
         for i in range(BONUS_ROUND_ENEMIES):
-            delay = i * 0.3
+            delay = i * 0.10
             pattern = i % 4
             path: list[tuple[float, float]] = []
             cx = WIDTH // 2
@@ -502,7 +503,7 @@ class Game:
                     py = 150 + 200 * math.sin(2.5 * math.pi * t)
                     path.append((px, py))
 
-            self.bonus_round_enemies.append(BonusEnemy(path, speed=180, delay=delay))
+            self.bonus_round_enemies.append(BonusEnemy(path, speed=250, delay=delay))
 
         self.banners.append(AchievementBanner("BONUS ROUND!", self.font_sm))
         self.enemy_bullets = []
@@ -1245,7 +1246,7 @@ class Game:
             if not harb.alive:
                 continue
             if isinstance(harb, Sentinel):
-                new_bullets = harb.update(dt)
+                new_bullets = harb.update(dt, self.player_x)
                 self.enemy_bullets.extend(new_bullets)
             elif isinstance(harb, Wraith):
                 new_missiles = harb.update(dt, self.player_x, self.player_y)
@@ -1885,8 +1886,22 @@ class Game:
                         bullets_hit.add(bi)
                         self.bonus_round_killed += 1
                         self.score += BONUS_ROUND_SCORE
-                        self._spawn_explosion(be.x, be.y, be.colour, count=10)
+                        self._spawn_explosion(be.x, be.y, be.colour, count=18)
                         self.sfx.play("explode")
+                        # Frag chain: kill nearby bonus enemies (1-level only)
+                        for other in self.bonus_round_enemies:
+                            if not other.alive or not other.active or other is be:
+                                continue
+                            if math.hypot(be.x - other.x, be.y - other.y) < BONUS_FRAG_RADIUS:
+                                other.alive = False
+                                self.bonus_round_killed += 1
+                                self.score += BONUS_ROUND_SCORE
+                                self._spawn_explosion(other.x, other.y, other.colour, count=12)
+                        # Drop power-up every N kills
+                        if self.bonus_round_killed % BONUS_POWERUP_EVERY == 0:
+                            pu_kind = WeightedPowerUp.weighted_random_type(self.wave)
+                            self.powerups.append(PowerUp(be.x, be.y, kind=pu_kind))
+                            self.sfx.play("powerup")
                         break
 
         # ── Homing missiles vs player ────────────────────────────────────

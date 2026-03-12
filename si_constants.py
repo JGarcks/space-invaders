@@ -396,10 +396,12 @@ SOLAR_FLARE_BEAM_HEIGHT = 40     # pixels tall
 
 # ── Bonus Round ─────────────────────────────────────────────────────────────
 BONUS_ROUND_INTERVAL   = 25      # every 25 waves
-BONUS_ROUND_ENEMIES    = 40
+BONUS_ROUND_ENEMIES    = 160
 BONUS_ROUND_SCORE      = 100     # per enemy
 BONUS_ROUND_PERFECT    = 10000   # perfect bonus
-BONUS_ROUND_DURATION   = 20.0    # seconds
+BONUS_ROUND_DURATION   = 30.0    # seconds
+BONUS_FRAG_RADIUS      = 75.0    # pixels — chain-kill radius on explosion
+BONUS_POWERUP_EVERY    = 5       # drop a power-up every N kills
 
 # ── Graze Scoring ───────────────────────────────────────────────────────────
 GRAZE_DISTANCE         = 15      # pixels
